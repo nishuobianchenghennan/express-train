@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">讲明白</title>
+  <rect width="512" height="512" rx="104" fill="#f6f7f3"/>
+  <path d="M112 126h288v196c0 45-37 82-82 82H194c-45 0-82-37-82-82V126Z" fill="#174f55"/>
+  <path d="M162 184h188M162 244h136M162 304h164" fill="none" stroke="#fff" stroke-linecap="round" stroke-width="28"/>
+  <circle cx="367" cy="326" r="58" fill="#e66b4d"/>
+  <path d="m345 327 15 15 30-34" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/>
+</svg>

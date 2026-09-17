@@ -1,0 +1,33 @@
+{
+  "name": "讲明白 · 个人综合表达训练",
+  "short_name": "讲明白",
+  "description": "场景化、可复盘、支持重讲的本地表达训练工具。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f7f3",
+  "theme_color": "#f6f7f3",
+  "categories": ["education", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "开始今日训练",
+      "short_name": "今日训练",
+      "url": "/#home"
+    },
+    {
+      "name": "查看训练历史",
+      "short_name": "训练历史",
+      "url": "/#history"
+    }
+  ]
+}
