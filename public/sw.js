@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "speak-clearly-";
-const CACHE_NAME = `${CACHE_PREFIX}2026.09.16-3`;
+const CACHE_NAME = `${CACHE_PREFIX}2026.09.16-4`;
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -59,12 +59,30 @@ self.addEventListener("fetch", (event) => {
 
   const key = cacheKeyFor(request);
   if (request.mode === "navigate") {
-    event.respondWith(
-      caches.open(CACHE_NAME).then(async (cache) => {
-        const cached = await cache.match("/index.html");
-        return cached ?? fetch(request, { cache: "no-store" });
-      }),
-    );
+    event.respondWith((async () => {
+      try {
+        const response = await fetch(request, { cache: "no-store" });
+        if (response.ok) {
+          try {
+            const cache = await caches.open(CACHE_NAME);
+            await cache.put("/index.html", response.clone());
+          } catch {
+            // A usable network response must not fail because Cache Storage is unavailable.
+          }
+        }
+        return response;
+      } catch (networkError) {
+        try {
+          const cached = await caches.match("/index.html");
+          if (cached) {
+            return cached;
+          }
+        } catch {
+          // Re-throw the original network error when both network and cache are unavailable.
+        }
+        throw networkError;
+      }
+    })());
     return;
   }
 
