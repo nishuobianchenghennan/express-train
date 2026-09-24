@@ -681,6 +681,10 @@ function renderHelp(session, card) {
     `<strong>第 5 层 · 结构问题</strong><p>开头要解决听众的什么疑问？中段哪条证据真正支撑主旨？结尾需要保留什么边界？</p>`,
     `<strong>第 6 层 · 降级选择</strong><p>可以回到首页结束并记录未完成，或下一次使用快速模式和更低难度题卡。</p>`,
 
+  ];
+  return `<section class="help-panel"><div class="help-head"><div><p class="eyebrow">分层帮助 ${level} / 6</p><h3>只提供下一步问题</h3></div>${level < 6 ? `<button class="button button-ghost" type="button" data-action="unlock-help">再打开一层</button>` : ""}</div><div class="help-levels">${content.slice(0, level).map((item) => `<div>${item}</div>`).join("")}</div></section>`;
+}
+
 function analogousExampleLine(step, protocol) {
   const examples = {
     research_expression: {
@@ -737,9 +741,6 @@ function analogousExampleLine(step, protocol) {
   if (/方案|行动|建议|计划|实验|试行|请求|下一步/.test(step)) return examples.action;
   if (/目标|受众|对方|共同/.test(step)) return examples.target;
   return examples.close;
-}
-  ];
-  return `<section class="help-panel"><div class="help-head"><div><p class="eyebrow">分层帮助 ${level} / 6</p><h3>只提供下一步问题</h3></div>${level < 6 ? `<button class="button button-ghost" type="button" data-action="unlock-help">再打开一层</button>` : ""}</div><div class="help-levels">${content.slice(0, level).map((item) => `<div>${item}</div>`).join("")}</div></section>`;
 }
 
 function learningDirection(card, prompt, index) {

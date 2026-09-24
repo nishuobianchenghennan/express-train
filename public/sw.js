@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "speak-clearly-";
-const CACHE_NAME = `${CACHE_PREFIX}2026.09.16-5`;
+const CACHE_NAME = `${CACHE_PREFIX}2026.09.16-6`;
 const APP_SHELL = [
   "/",
   "/index.html",
