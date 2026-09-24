@@ -13,7 +13,6 @@ import {
   currentElapsed,
   extendTimer,
   orderedStages,
-  previousPreparationStage,
   stageLabel,
   startTraining,
   timerRemaining,
@@ -565,7 +564,7 @@ function renderHome() {
 }
 
 function renderTaskPreview(session, card) {
-  const stageEntries = Object.entries(session.stageMinutes);
+  const stageEntries = Object.entries(session.stageMinutes).filter(([stage, minutes]) => stage !== "organize" && minutes > 0);
   const sensitiveNotice = cardIsSensitive(card)
     ? `<section class="sensitive-task-notice" aria-labelledby="sensitive-task-title">
         <div>${icon("info")}</div>
@@ -681,36 +680,131 @@ function renderHelp(session, card) {
     `<strong>第 4 层 · 来源类型</strong><p>优先寻找原始规则、政府或大学页面、专业机构、论文或可靠书籍，并核对发布日期与适用对象。</p>`,
     `<strong>第 5 层 · 结构问题</strong><p>开头要解决听众的什么疑问？中段哪条证据真正支撑主旨？结尾需要保留什么边界？</p>`,
     `<strong>第 6 层 · 降级选择</strong><p>可以回到首页结束并记录未完成，或下一次使用快速模式和更低难度题卡。</p>`,
+
+function analogousExampleLine(step, protocol) {
+  const examples = {
+    research_expression: {
+      define: "这里讨论的延长开放，是周末固定增加两个小时，不包括通宵开放。",
+      claim: "我的建议是先试行四周，而不是立即长期调整。",
+      evidence: "预约记录显示需求主要集中在周六下午，这支持试行，但不能证明所有周末都有同样需求。",
+      reason: "延长开放可能缓解高峰拥挤，也能让工作日无法到馆的人获得稳定时段。",
+      counter: "不过，如果额外人力和安全成本超过可承受范围，就应缩短试行时段。",
+      example: "例如，考试周座位提前约满，说明特定时期确有需求，但这个个例不能代表全年。",
+      action: "因此可由运营人员连续四周记录到访量、成本和投诉，再决定是否保留。",
+      target: "对周末才有时间的读者来说，真正需要的是一个可预期的固定时段。",
+      close: "所以当前能确定的是值得小范围验证，而不是已经证明必须永久延长。",
+    },
+    impromptu_expression: {
+      define: "这里说的高效，既包括会议时长，也包括会后是否需要返工。",
+      claim: "我的判断是线上会议不一定更高效，它取决于任务类型和会前准备。",
+      evidence: "如果议题和材料提前明确，线上形式能减少切换成本；否则只是把混乱搬到屏幕上。",
+      reason: "效率来自信息准备和决策方式，而不是会议工具本身。",
+      counter: "不过，涉及复杂共创或敏感沟通时，线下互动可能更容易发现误解。",
+      example: "例如，十分钟状态同步适合线上，但第一次讨论复杂方案时可能需要更丰富的互动。",
+      action: "因此可以先按任务类型选形式，并在会后检查是否形成清楚决定。",
+      target: "参与者真正需要的不是少见面，而是减少无结论的时间消耗。",
+      close: "所以问题不在于线上还是线下，而在于哪种形式更适合当前任务。",
+    },
+    interactive_communication: {
+      define: "我先确认一下：你担心改时间会影响接送安排，对吗？",
+      claim: "我想提出一个可调整的方案，不希望让任何人被迫接受。",
+      evidence: "目前三个人周三冲突，另外两个人周四不便，这是我们已经确认的事实。",
+      reason: "共同目标是让关键成员能参加，同时不要把成本转移给某一个人。",
+      counter: "如果周四仍让你很困难，我们可以保留原时间，改用异步补充。",
+      example: "比如先试一次周四会议，会后再确认是否真的改善参与情况。",
+      action: "你愿意在周四试一次，还是更倾向保留周三并调整议程？",
+      target: "我们都希望信息不遗漏，也希望每个人的现实限制被看见。",
+      close: "你可以选择其中一个方案，也可以提出第三种安排。",
+    },
+    formal_task: {
+      define: "本次问题是报名人数与实际到场人数差距较大，目前还不能确定具体原因。",
+      claim: "建议下一场先改进提醒和路线说明，同时补充收集未到场原因。",
+      evidence: "本次八十人报名、四十六人到场；现有反馈只提到时间和路线，样本并不完整。",
+      reason: "到场差距会影响物料、人力和场地安排，也会使活动效果判断失真。",
+      counter: "风险是新增提醒仍不能解决时间冲突，因此不能把改善全部归因于提醒。",
+      example: "例如，有参与者明确表示找不到入口，但我们不知道这是否是主要原因。",
+      action: "建议下次由运营在活动前一天发送提醒，活动后两天汇总未到场问卷。",
+      target: "负责人需要的是可验证的改进方案，而不是在证据不足时直接归因。",
+      close: "下一步先验证提醒与路线说明的影响，再决定是否调整活动时间。",
+    },
+  }[protocol];
+  if (/定义|界定|概念|标准|问题/.test(step)) return examples.define;
+  if (/结论|立场|判断|主张/.test(step)) return examples.claim;
+  if (/事实|证据|发现|数据/.test(step)) return examples.evidence;
+  if (/理由|机制|原理|影响|障碍/.test(step)) return examples.reason;
+  if (/反方|另一面|风险|顾虑|边界|局限|限制|让步/.test(step)) return examples.counter;
+  if (/例子|案例|情境|场景|故事|经历/.test(step)) return examples.example;
+  if (/方案|行动|建议|计划|实验|试行|请求|下一步/.test(step)) return examples.action;
+  if (/目标|受众|对方|共同/.test(step)) return examples.target;
+  return examples.close;
+}
   ];
   return `<section class="help-panel"><div class="help-head"><div><p class="eyebrow">分层帮助 ${level} / 6</p><h3>只提供下一步问题</h3></div>${level < 6 ? `<button class="button button-ghost" type="button" data-action="unlock-help">再打开一层</button>` : ""}</div><div class="help-levels">${content.slice(0, level).map((item) => `<div>${item}</div>`).join("")}</div></section>`;
+}
+
+function learningDirection(card, prompt, index) {
+  const directions = [
+    ["界定关键词与范围", `“${card.topicLabel}” + 定义 / 范围 / 适用对象`, "记录一句自己的定义、包含什么、不包含什么。"],
+    ["理解原因或机制", `“${card.topicLabel}” + 原因 / 机制 / 如何影响`, "记录因果链，以及仍不能确定的一环。"],
+    ["寻找支撑判断的证据", `“${card.topicLabel}” + 数据 / 研究 / 案例 / 官方`, "记录证据具体支持哪句话。"],
+    ["寻找反方与适用边界", `“${card.topicLabel}” + 争议 / 反例 / 局限 / 风险`, "记录最强反方、让步点和结论成立条件。"],
+  ];
+  const [goal, query, capture] = directions[index % directions.length];
+  return { prompt, goal, query, capture };
+}
+
+function analogousScenario(protocol) {
+  return {
+    research_expression: "社区图书馆是否延长周末开放时间",
+    impromptu_expression: "线上会议是否一定更高效",
+    interactive_communication: "与同伴协商调整小组会议时间",
+    formal_task: "汇报一次活动报名后到场不足",
+  }[protocol] ?? "一个相似的日常决策问题";
+}
+
+function stepGuidance(step) {
+  if (/定义|界定|概念|标准/.test(step)) return ["先把对象、关键词和范围说清楚。", "这里所说的……是指……，本次只讨论……"];
+  if (/结论|立场|判断|主张/.test(step)) return ["用一句可被反驳、带条件的判断回答题目。", "我的暂定判断是……，前提是……"];
+  if (/事实|证据|发现|数据/.test(step)) return ["只选直接支撑上一句的证据，并说明来源。", "我找到的关键信息是……，它只能说明……"];
+  if (/理由|机制|原理|影响|问题|障碍/.test(step)) return ["解释为什么，不只重复结论，把因果链说完整。", "之所以这样判断，是因为……会进一步导致……"];
+  if (/反方|另一面|风险|顾虑|边界|局限|限制|让步/.test(step)) return ["呈现最强反方或失败条件，再调整结论。", "不过，如果……，这个判断就需要调整，因为……"];
+  if (/例子|案例|情境|场景|故事|经历/.test(step)) return ["用一个具体场景让抽象关系可见，不让个例代替证据。", "例如，在……这个具体场景里，可以看到……"];
+  if (/方案|行动|建议|计划|实验|试行|请求|下一步/.test(step)) return ["提出责任、时间和验证标准清楚的下一步。", "因此，下一步可以先……，由……在……前完成。"];
+  if (/目标|受众|对方|共同/.test(step)) return ["先连接听众真正关心的目标。", "对……来说，真正需要解决的是……"];
+  if (/反思|回扣|收束|开放|选择/.test(step)) return ["回到开头问题，给出有限结论或保留选择。", "回到一开始的问题，我目前能确定的是……"];
+  return ["说明这一节点在主线中的作用，并连接前后句。", "基于前一点，接下来需要说明的是……"];
+}
+
+function renderSpeakingOutline(session, card) {
+  const notes = card.organizingTemplate.map((key) => session.userNotes?.[key]?.trim() ?? "");
+  return card.structureSteps.map((step, index) => {
+    const [, starter] = stepGuidance(step);
+    const note = notes[index % Math.max(1, notes.length)];
+    return `<article><div><span>${index + 1}</span><strong>${escapeHtml(step)}</strong></div><p>${escapeHtml(starter)}</p><blockquote>${note ? escapeHtml(note) : "等待填写对应观点整理项"}</blockquote></article>`;
+  }).join("");
+}
+
+function updateSpeakingOutline() {
+  const panel = root.querySelector("[data-speaking-outline]");
+  const card = cardForSession();
+  if (panel && card) panel.innerHTML = renderSpeakingOutline(state.activeSession, card);
 }
 
 function renderResearch(session, card) {
   const requiresSources = ["standard", "sensitive"].includes(card.sourceMode);
   const sourceRows = session.sources ?? [];
+  const filled = card.organizingTemplate.filter((item) => session.userNotes?.[item]?.trim()).length;
   const body = `
-    <section class="stage-intro">
-      <p class="eyebrow">只给检索任务，不给检索结果</p>
-      <h2>${escapeHtml(card.title)}</h2>
-      <p>${escapeHtml(card.context)}</p>
-    </section>
-    <section class="workspace-section">
-      <div class="section-heading"><div><h2>${requiresSources ? "自主检索清单" : card.sourceMode === "given" ? "背景核对清单" : "准备问题"}</h2><p>勾选仅代表你已处理过这个问题，不代表存在标准答案。</p></div><span class="count-badge" data-research-count>${Object.values(session.researchChecks ?? {}).filter(Boolean).length} / ${card.researchPrompts.length}</span></div>
-      <div class="prompt-checks">${card.researchPrompts
-        .map(
-          (prompt, index) => `<label><input type="checkbox" data-research-prompt="${index}"${checked(session.researchChecks?.[prompt])}><span><strong>问题 ${index + 1}</strong>${escapeHtml(prompt)}</span></label>`,
-        )
-        .join("")}</div>
-    </section>
-    <section class="workspace-section">
-      <div class="section-heading"><div><h2>${requiresSources ? "来源记录" : "证据与边界记录"}</h2><p>${requiresSources ? "至少记录来源名称、链接，以及它实际支持了什么。" : "把已知事实、个人观察和推测分开。"}</p></div>${requiresSources ? `<button class="button button-secondary" type="button" data-action="add-source">${icon("plus")}添加来源</button>` : ""}</div>
-      ${requiresSources ? `<div class="source-list">${sourceRows.length ? sourceRows.map((source, index) => renderSourceRow(source, index)).join("") : `<div class="empty-inline"><p>还没有来源记录。</p><button class="button button-secondary" type="button" data-action="add-source">${icon("plus")}添加第一个来源</button></div>`}</div>` : `<div class="boundary-note">${card.sourceRequirements.map((item) => `<p>${icon("check")}<span>${escapeHtml(item)}</span></p>`).join("")}</div>`}
-      <label class="confirmation-check"><input type="checkbox" data-session-field="sourceRequirementsMet"${checked(session.sourceRequirementsMet)}><span>我已按本题要求区分事实、观点与推测，并记录必要的反方或边界。</span></label>
-    </section>
+    <section class="stage-intro learning-stage-intro"><p class="eyebrow">学习、判断、整理在同一阶段完成</p><h2>${escapeHtml(card.title)}</h2><p>${escapeHtml(card.context)}</p><ol class="learning-route"><li><span>1</span><div><strong>拆解学习问题</strong><p>明确要学什么、用什么关键词搜索、最终记录什么。</p></div></li><li><span>2</span><div><strong>建立证据卡</strong><p>记录来源及其真正支持的判断。</p></div></li><li><span>3</span><div><strong>形成有限观点</strong><p>填写判断、理由、证据、反方和边界。</p></div></li><li><span>4</span><div><strong>映射成表达骨架</strong><p>把笔记放入结构节点，形成口头提纲。</p></div></li></ol></section>
+    <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 1 步</p><h2>按问题学习，而不是漫无目的搜索</h2><p>每处理完一项再勾选，并留下可供观点整理的信息。</p></div><span class="count-badge" data-research-count>${Object.values(session.researchChecks ?? {}).filter(Boolean).length} / ${card.researchPrompts.length}</span></div><div class="research-plan">${card.researchPrompts.map((prompt, index) => { const direction = learningDirection(card, prompt, index); return `<article><label><input type="checkbox" data-research-prompt="${index}"${checked(session.researchChecks?.[prompt])}><span><b>问题 ${index + 1}</b>${escapeHtml(prompt)}</span></label><dl><div><dt>学习目标</dt><dd>${escapeHtml(direction.goal)}</dd></div><div><dt>检索方向</dt><dd>${escapeHtml(direction.query)}</dd></div><div><dt>完成产物</dt><dd>${escapeHtml(direction.capture)}</dd></div></dl></article>`; }).join("")}</div></section>
+    <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 2 步</p><h2>${requiresSources ? "把检索结果变成证据卡" : "核对事实、观察与边界"}</h2><p>${requiresSources ? "至少保留两个来源；每张卡写清它支持哪一句、不能证明什么。" : "把已知事实、个人观察和推测分开。"}</p></div>${requiresSources ? `<button class="button button-secondary" type="button" data-action="add-source">${icon("plus")}添加证据卡</button>` : ""}</div>${requiresSources ? `<div class="source-list">${sourceRows.length ? sourceRows.map((source, index) => renderSourceRow(source, index)).join("") : `<div class="empty-inline"><p>还没有证据卡。</p><button class="button button-secondary" type="button" data-action="add-source">${icon("plus")}添加第一张证据卡</button></div>`}</div>` : `<div class="boundary-note">${card.sourceRequirements.map((item) => `<p>${icon("check")}<span>${escapeHtml(item)}</span></p>`).join("")}</div>`}<label class="confirmation-check"><input type="checkbox" data-session-field="sourceRequirementsMet"${checked(session.sourceRequirementsMet)}><span>我已区分事实、来源观点和个人推测，并写下至少一个反方或适用边界。</span></label></section>
+    <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 3 步</p><h2>把材料转成自己的有限观点</h2><p>每格先写判断，再补“因为—证据—但是”。</p></div><span class="count-badge" data-organize-count>${filled} / ${card.organizingTemplate.length}</span></div><div class="notes-grid">${card.organizingTemplate.map((item, index) => `<label class="field note-field"><span><b>${index + 1}</b>${escapeHtml(item)}</span><textarea rows="5" data-note-key="${escapeHtml(item)}" placeholder="判断：……\n因为：……\n证据或例子：……\n但是/边界：……">${escapeHtml(session.userNotes?.[item] ?? "")}</textarea></label>`).join("")}</div></section>
+    <section class="workspace-section learning-step structure-workbench"><div class="section-heading"><div><p class="eyebrow">第 4 步</p><h2>把观点映射成 ${escapeHtml(card.structureName)}</h2><p>示例只展示信息角色和排序，不提供当前命题答案。</p></div></div><div class="structure-guide">${card.structureSteps.map((step, index) => { const [action, starter] = stepGuidance(step); return `<article><span>${index + 1}</span><div><strong>${escapeHtml(step)}</strong><p>${escapeHtml(action)}</p><small>${escapeHtml(starter)}</small></div></article>`; }).join("")}</div><details class="analogous-example"><summary>${icon("info")}相似结构示例：${escapeHtml(analogousScenario(card.protocol))}</summary><p>只模仿信息顺序，不复制示例立场、事实或结论。</p><ol>${card.structureSteps.map((step) => `<li><strong>${escapeHtml(step)}</strong><span>${escapeHtml(analogousExampleLine(step, card.protocol))}</span></li>`).join("")}</ol></details><div class="outline-panel"><div class="section-heading"><div><h3>你的结构化表达骨架</h3><p>系统只把你的笔记放进结构，不代写主题答案。请将占位句改成自己的口语。</p></div></div><div data-speaking-outline>${renderSpeakingOutline(session, card)}</div></div></section>
+    <section class="organize-check" data-organize-check><h3>进入表达前的检查</h3>${organizeWarnings(session, card).map((item) => `<p>${icon("info")}<span>${escapeHtml(item)}</span></p>`).join("")}</section>
     ${renderHelp(session, card)}
-    <div class="action-bar"><button class="button button-ghost" type="button" data-action="open-abandon">结束并记录未完成</button><button class="button button-primary" type="button" data-action="advance-stage">进入${escapeHtml(stageLabel(card.protocol, "organize"))}${icon("arrowRight")}</button></div>
+    <div class="action-bar"><button class="button button-ghost" type="button" data-action="open-abandon">结束并记录未完成</button><button class="button button-primary" type="button" data-action="advance-stage">带着表达骨架进入第一次表达${icon("arrowRight")}</button></div>
   `;
-  const sidebar = `<section class="side-note"><h3>来源要求</h3><ul>${card.sourceRequirements.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section><section class="side-note distinction"><h3>记录时始终区分</h3><dl><div><dt>事实</dt><dd>可由来源核验</dd></div><div><dt>观点</dt><dd>作者或你的判断</dd></div><div><dt>推测</dt><dd>仍需验证的解释</dd></div></dl></section>`;
+  const sidebar = `<section class="side-note"><h3>本阶段完成标准</h3><ol><li>全部学习问题已处理</li><li>${requiresSources ? "至少两张有效证据卡" : "已区分事实与推测"}</li><li>至少三个观点整理项</li><li>能按结构节点口头复述</li></ol></section><section class="side-note"><h3>始终区分</h3><dl><div><dt>事实</dt><dd>来源可核验</dd></div><div><dt>观点</dt><dd>你的有限判断</dd></div><div><dt>推测</dt><dd>仍需验证</dd></div></dl></section>`;
   return renderStageShell(session, card, body, sidebar);
 }
 
@@ -741,31 +835,6 @@ function organizeWarnings(session, card) {
   return warnings;
 }
 
-function renderOrganize(session, card) {
-  const filled = card.organizingTemplate.filter((item) => session.userNotes?.[item]?.trim()).length;
-  const body = `
-    <section class="stage-intro">
-      <p class="eyebrow">由你填写内容，系统只检查缺项</p><h2>${escapeHtml(card.structureName)}</h2>
-      <p>推荐结构只代表当前场景、受众、目的和时长下的适配方案，不是这个话题的唯一结构。</p>
-    </section>
-    <section class="structure-map" aria-label="推荐结构">
-      ${card.structureSteps.map((step, index) => `<div><span>${index + 1}</span><strong>${escapeHtml(step)}</strong><small>${escapeHtml(timingGuidanceForSession(session, card)[index] ?? "")}</small></div>`).join("")}
-    </section>
-    <section class="workspace-section">
-      <div class="section-heading"><div><h2>空白整理模板</h2><p>只写关键词、证据位置和逻辑关系，不写可照读全文。</p></div><span class="count-badge" data-organize-count>${filled} / ${card.organizingTemplate.length}</span></div>
-      <div class="notes-grid">${card.organizingTemplate
-        .map(
-          (item, index) => `<label class="field note-field"><span><b>${index + 1}</b>${escapeHtml(item)}</span><textarea rows="4" data-note-key="${escapeHtml(item)}" placeholder="用自己的关键词填写…">${escapeHtml(session.userNotes?.[item] ?? "")}</textarea></label>`,
-        )
-        .join("")}</div>
-    </section>
-    <section class="organize-check" data-organize-check><h3>进入表达前的提问式检查</h3>${organizeWarnings(session, card).map((item) => `<p>${icon("info")}<span>${escapeHtml(item)}</span></p>`).join("")}</section>
-    ${renderHelp(session, card)}
-    <div class="action-bar"><button class="button button-ghost" type="button" data-action="previous-preparation">${icon("chevronLeft")}返回${escapeHtml(stageLabel(card.protocol, "research"))}</button><button class="button button-primary" type="button" data-action="advance-stage">进入第一次表达${icon("arrowRight")}</button></div>
-  `;
-  const sidebar = `<section class="side-note"><h3>本轮输出限制</h3><ul>${card.constraints.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section><section class="side-note"><h3>主要训练能力</h3><p>${escapeHtml(card.primarySkill)}</p><div class="mini-tags">${card.secondarySkills.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div></section>`;
-  return renderStageShell(session, card, body, sidebar);
-}
 
 function renderRecorder(session, slot) {
   const isFirst = slot === "first";
@@ -789,8 +858,8 @@ function renderRecorder(session, slot) {
 function renderDelivery(session, card) {
   const body = `
     <section class="delivery-focus">
-      <p class="eyebrow">完整笔记已收起 · 只保留结构关键词</p><h2>${escapeHtml(card.title)}</h2><p>面向：${escapeHtml(card.audience)}</p>
-      <div class="delivery-keywords">${card.structureSteps.map((step, index) => `<div><span>${String(index + 1).padStart(2, "0")}</span><strong>${escapeHtml(step)}</strong></div>`).join("")}</div>
+      <p class="eyebrow">使用你刚整理出的表达骨架</p><h2>${escapeHtml(card.title)}</h2><p>面向：${escapeHtml(card.audience)}。按节点表达，不必逐字照读。</p>
+      <div class="delivery-outline speaking-outline">${renderSpeakingOutline(session, card)}</div>
     </section>
     ${renderRecorder(session, "first")}
     <div class="gentle-note">${icon("clock")}<p>到达目标时间后，系统只会温和提示。请完成当前句并自然收束，不会强制停止。</p></div>
@@ -891,10 +960,8 @@ function renderTraining() {
   let content;
   if (session.stage === "preview") {
     content = renderTaskPreview(session, card);
-  } else if (session.stage === "research") {
+  } else if (["research", "organize"].includes(session.stage)) {
     content = renderResearch(session, card);
-  } else if (session.stage === "organize") {
-    content = renderOrganize(session, card);
   } else if (session.stage === "firstDelivery") {
     content = renderDelivery(session, card);
   } else if (session.stage === "review") {
@@ -1816,12 +1883,6 @@ root.addEventListener("click", async (event) => {
     updateActive((session) => ({ ...session, sources: session.sources.filter((_, itemIndex) => itemIndex !== index) }), { render: true, markNotes: true });
   } else if (action === "unlock-help") {
     updateActive((session) => ({ ...session, helpLevels: { ...(session.helpLevels ?? {}), [session.stage]: Math.min(6, (session.helpLevels?.[session.stage] ?? 0) + 1) } }), { render: true });
-  } else if (action === "previous-preparation") {
-    updateActive((session) => {
-      const previous = previousPreparationStage(session);
-      requestStageFocus(previous);
-      return previous;
-    }, { render: true });
   } else if (action === "advance-stage") {
     await advanceCurrentStage();
   } else if (action === "start-recording") {
@@ -1892,9 +1953,7 @@ root.addEventListener("click", async (event) => {
   } finally {
     if (exclusive) {
       actionInFlight = false;
-      if (control.isConnected) {
-        control.disabled = false;
-      }
+      if (control.isConnected) control.disabled = false;
     }
   }
 });
@@ -1941,6 +2000,7 @@ root.addEventListener("input", (event) => {
     const key = target.dataset.noteKey;
     updateActive((session) => ({ ...session, userNotes: { ...session.userNotes, [key]: target.value } }), { markNotes: true });
     updateOrganizeLiveFeedback();
+    updateSpeakingOutline();
   } else if (target.matches("[data-session-text]")) {
     updateActive((session) => ({ ...session, [target.dataset.sessionText]: target.value }), { markNotes: true });
   } else if (target.matches("[data-library-filter='query']")) {

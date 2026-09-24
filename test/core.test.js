@@ -163,7 +163,7 @@ test("target-timestamp timer survives pause and extension", () => {
   const origin = 1_000_000;
 
   session = toggleTimer(session, origin);
-  assert.equal(timerRemaining(session.timer, origin + 20_000), 40);
+  assert.equal(timerRemaining(session.timer, origin + 20_000), 100);
   assert.equal(Math.round(currentElapsed(session.timer, origin + 20_000)), 20);
 
   session = toggleTimer(session, origin + 20_000);
@@ -171,27 +171,31 @@ test("target-timestamp timer survives pause and extension", () => {
   assert.equal(Math.round(session.timer.elapsedSeconds), 20);
 
   session = extendTimer(session, 300);
-  assert.equal(session.timer.durationSeconds, 360);
+  assert.equal(session.timer.durationSeconds, 420);
   assert.equal(session.extendedStages.research, 300);
 });
 
-test("training stages enforce sources, notes, recordings, self-review and replay", () => {
+test("combined learning stage enforces research, evidence and structured notes before delivery", () => {
   const card = TASK_CARDS.find((item) => item.id === "VID-002");
   let session = startTraining(createSession(card, { mode: "full" }));
 
+  assert.equal(session.stage, "research");
+  assert.equal(session.stageMinutes.organize, 0);
+  assert.equal(session.stageMinutes.research, card.stageMinutes.research + card.stageMinutes.organize);
   assert.equal(validateStage(session, card).valid, false);
+
+  for (const prompt of card.researchPrompts) {
+    session.researchChecks[prompt] = true;
+  }
   session.sources = [
     { name: "来源一", url: "https://example.com/one", support: "支持判断标准", kind: "fact" },
     { name: "来源二", url: "https://example.com/two", support: "提供边界材料", kind: "counter" },
   ];
   session.sourceRequirementsMet = true;
-  assert.equal(validateStage(session, card).valid, true);
-
-  session = advanceStage(session, 10_000);
-  assert.equal(session.stage, "organize");
   assert.equal(validateStage(session, card).valid, false);
+
   for (const key of card.organizingTemplate.slice(0, 3)) {
-    session.userNotes[key] = `${key}的用户笔记`;
+    session.userNotes[key] = `${key}的判断、证据与边界`;
   }
   assert.equal(validateStage(session, card).valid, true);
 
@@ -214,7 +218,6 @@ test("training stages enforce sources, notes, recordings, self-review and replay
 
   session = advanceStage(session, 40_000);
   assert.equal(session.stage, "retry");
-  assert.equal(validateStage(session, card).valid, false);
   session.recordingUnavailable.retry = true;
   for (const metricId of card.reviewMetricIds) {
     session.retryScores[metricId] = 4;

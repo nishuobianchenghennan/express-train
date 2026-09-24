@@ -1,33 +1,33 @@
-const STAGES = ["research", "organize", "firstDelivery", "review", "retry", "complete"];
+const STAGES = ["research", "firstDelivery", "review", "retry", "complete"];
 
 const PROTOCOL_STAGE_LABELS = {
   research_expression: {
-    research: "自主调研",
-    organize: "整理观点",
+    research: "学习与观点整理",
+    organize: "学习与观点整理",
     firstDelivery: "第一次表达",
     review: "回听复盘",
     retry: "针对性重讲",
     complete: "训练完成",
   },
   impromptu_expression: {
-    research: "审题",
-    organize: "关键词提纲",
+    research: "审题与观点提纲",
+    organize: "审题与观点提纲",
     firstDelivery: "第一次表达",
     review: "回听复盘",
     retry: "针对性重讲",
     complete: "训练完成",
   },
   interactive_communication: {
-    research: "理解情境",
-    organize: "回应路径",
+    research: "理解情境与回应整理",
+    organize: "理解情境与回应整理",
     firstDelivery: "多轮回应",
     review: "路径复盘",
     retry: "关键轮次重答",
     complete: "训练完成",
   },
   formal_task: {
-    research: "阅读背景",
-    organize: "整理汇报",
+    research: "阅读背景与整理汇报",
+    organize: "阅读背景与整理汇报",
     firstDelivery: "正式表达",
     review: "追问与复盘",
     retry: "修订重讲",
@@ -36,10 +36,10 @@ const PROTOCOL_STAGE_LABELS = {
 };
 
 const QUICK_MINUTES = {
-  research_expression: { research: 3, organize: 2, firstDelivery: 2, review: 2, retry: 2 },
-  impromptu_expression: { research: 1, organize: 1, firstDelivery: 2, review: 2, retry: 2 },
-  interactive_communication: { research: 1, organize: 1, firstDelivery: 4, review: 2, retry: 2 },
-  formal_task: { research: 2, organize: 3, firstDelivery: 2, review: 2, retry: 2 },
+  research_expression: { research: 5, organize: 0, firstDelivery: 2, review: 2, retry: 2 },
+  impromptu_expression: { research: 2, organize: 0, firstDelivery: 2, review: 2, retry: 2 },
+  interactive_communication: { research: 2, organize: 0, firstDelivery: 4, review: 2, retry: 2 },
+  formal_task: { research: 5, organize: 0, firstDelivery: 2, review: 2, retry: 2 },
 };
 
 function id() {
@@ -47,7 +47,14 @@ function id() {
 }
 
 export function stageMinutes(card, mode = "full") {
-  return mode === "quick" ? QUICK_MINUTES[card.protocol] : card.stageMinutes;
+  if (mode === "quick") {
+    return { ...QUICK_MINUTES[card.protocol] };
+  }
+  return {
+    ...card.stageMinutes,
+    research: (card.stageMinutes.research ?? 0) + (card.stageMinutes.organize ?? 0),
+    organize: 0,
+  };
 }
 
 export function createSession(card, options = {}) {
@@ -192,7 +199,8 @@ export function orderedStages() {
 }
 
 export function advanceStage(session, now = Date.now()) {
-  const currentIndex = STAGES.indexOf(session.stage);
+  const currentStage = session.stage === "organize" ? "research" : session.stage;
+  const currentIndex = STAGES.indexOf(currentStage);
   if (currentIndex < 0 || currentIndex >= STAGES.length - 1) {
     return session;
   }
@@ -204,26 +212,18 @@ export function advanceStage(session, now = Date.now()) {
     stageIndex: currentIndex + 1,
     stageDurations: {
       ...session.stageDurations,
-      [session.stage]: elapsed,
+      [currentStage]: (session.stageDurations?.[currentStage] ?? 0) + elapsed,
     },
     timer: nextStage === "complete" ? null : createTimer(session.stageMinutes[nextStage] ?? 0),
   };
 }
 
-export function previousPreparationStage(session) {
-  if (session.stage !== "organize") {
-    return session;
-  }
-  return {
-    ...session,
-    stage: "research",
-    stageIndex: 0,
-    timer: createTimer(session.stageMinutes.research ?? 0),
-  };
-}
-
 export function validateStage(session, card) {
-  if (session.stage === "research") {
+  if (["research", "organize"].includes(session.stage)) {
+    const uncheckedPrompt = card.researchPrompts.find((prompt) => !session.researchChecks?.[prompt]);
+    if (uncheckedPrompt) {
+      return { valid: false, message: "请按顺序处理并勾选全部学习问题。" };
+    }
     const requiresSources = ["standard", "sensitive"].includes(card.sourceMode);
     const validSources = (session.sources ?? []).filter(
       (source) => source.name?.trim() && source.url?.trim() && source.support?.trim(),
@@ -234,11 +234,9 @@ export function validateStage(session, card) {
     if (!session.sourceRequirementsMet) {
       return { valid: false, message: "请确认已经区分事实、观点与推测，并处理必要边界。" };
     }
-  }
-  if (session.stage === "organize") {
     const completed = card.organizingTemplate.filter((item) => session.userNotes?.[item]?.trim()).length;
     if (completed < Math.min(3, card.organizingTemplate.length)) {
-      return { valid: false, message: "至少完成三个整理项，再进入第一次表达。" };
+      return { valid: false, message: "请至少完成三个观点整理项，再进入第一次表达。" };
     }
   }
   if (session.stage === "firstDelivery") {

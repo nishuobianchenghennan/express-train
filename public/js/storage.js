@@ -1,9 +1,11 @@
 import { TASK_CARDS } from "./data/cards.js";
+import { stageMinutes as sessionStageMinutes } from "./core/session.js";
 
 const DB_NAME = "speak-clearly-local";
 const DB_VERSION = 1;
 const FALLBACK_KEY = "speak-clearly-fallback";
 const STAGES = ["preview", "research", "organize", "firstDelivery", "review", "retry", "complete"];
+const CURRENT_STAGES = ["preview", "research", "firstDelivery", "review", "retry", "complete"];
 const COMPLETION_STATUSES = ["in_progress", "completed", "skipped", "abandoned"];
 const MODES = ["full", "quick"];
 const SOURCE_KINDS = ["fact", "viewpoint", "counter"];
@@ -414,17 +416,18 @@ function normalizeSession(raw, { active = false, stripRecordings = false } = {})
   if (!MODES.includes(mode)) {
     throw new Error(`训练记录 ${sessionId} 的训练模式无效`);
   }
-  const stage = raw.stage == null ? (completionStatus === "completed" ? "complete" : "preview") : raw.stage;
-  if (!STAGES.includes(stage)) {
+  const rawStage = raw.stage == null ? (completionStatus === "completed" ? "complete" : "preview") : raw.stage;
+  if (!STAGES.includes(rawStage)) {
     throw new Error(`训练记录 ${sessionId} 的训练阶段无效`);
   }
+  const stage = rawStage === "organize" ? "research" : rawStage;
   if (completionStatus === "in_progress" && stage === "complete") {
     throw new Error("进行中的训练阶段不能是 complete");
   }
   if (completionStatus === "completed" && stage !== "complete") {
     throw new Error(`已完成训练记录 ${sessionId} 的阶段必须是 complete`);
   }
-  const stageIndex = STAGES.indexOf(stage) - 1;
+  const stageIndex = CURRENT_STAGES.indexOf(stage) - 1;
   const startedAt = isoDate(raw.startedAt, "开始时间", { required: true });
   const completedAt = isoDate(raw.completedAt, "完成时间", {
     required: completionStatus === "completed" || (!active && completionStatus !== "in_progress"),
@@ -442,16 +445,7 @@ function normalizeSession(raw, { active = false, stripRecordings = false } = {})
   if (Boolean(annualPlanDate) !== Boolean(annualPlanDayNumber)) {
     throw new Error(`训练记录 ${sessionId} 的年度计划锚点不完整`);
   }
-  const stageMinutes = { ...card.stageMinutes };
-  if (mode === "quick") {
-    const quickMinutes = {
-      research_expression: { research: 3, organize: 2, firstDelivery: 2, review: 2, retry: 2 },
-      impromptu_expression: { research: 1, organize: 1, firstDelivery: 2, review: 2, retry: 2 },
-      interactive_communication: { research: 1, organize: 1, firstDelivery: 4, review: 2, retry: 2 },
-      formal_task: { research: 2, organize: 3, firstDelivery: 2, review: 2, retry: 2 },
-    }[card.protocol];
-    Object.assign(stageMinutes, quickMinutes);
-  }
+  const stageMinutes = sessionStageMinutes(card, mode);
   const recordingFirstId = normalizeRecordingReference(raw.recordingFirstId, "首次录音 ID", stripRecordings);
   const recordingRetryId = normalizeRecordingReference(raw.recordingRetryId, "重讲录音 ID", stripRecordings);
   if (raw.recordingUnavailable != null && !isPlainObject(raw.recordingUnavailable)) {
@@ -474,8 +468,20 @@ function normalizeSession(raw, { active = false, stripRecordings = false } = {})
   const userNotes = normalizeMap(raw.userNotes, "整理笔记", validNoteKeys, (value, field) => text(value, field, { max: 2_000 }));
   const researchChecks = normalizeMap(raw.researchChecks, "检索清单", new Set(card.researchPrompts), (value, field) => booleanValue(value, field));
   const helpLevels = normalizeMap(raw.helpLevels, "帮助层级", new Set(STAGES), (value, field) => finiteNumber(value, field, { min: 0, max: 6, integer: true }));
+  if (helpLevels.organize != null) {
+    helpLevels.research = Math.max(helpLevels.research ?? 0, helpLevels.organize);
+    delete helpLevels.organize;
+  }
   const stageDurations = normalizeMap(raw.stageDurations, "阶段时长记录", new Set(STAGES), (value, field) => finiteNumber(value, field, { min: 0, max: 86_400 }));
+  if (stageDurations.organize != null) {
+    stageDurations.research = (stageDurations.research ?? 0) + stageDurations.organize;
+    delete stageDurations.organize;
+  }
   const extendedStages = normalizeMap(raw.extendedStages, "阶段延期记录", new Set(STAGES), (value, field) => finiteNumber(value, field, { min: 0, max: 86_400 }));
+  if (extendedStages.organize != null) {
+    extendedStages.research = (extendedStages.research ?? 0) + extendedStages.organize;
+    delete extendedStages.organize;
+  }
   const normalized = {
     sessionId,
     taskCardId: card.id,

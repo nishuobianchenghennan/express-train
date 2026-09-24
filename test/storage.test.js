@@ -357,6 +357,27 @@ test("storage import, completion, archival and clearing remain atomic", async (t
     await storage.importLocalData(importDocument({ activeSession: completed }));
     assert.equal((await storage.loadActiveSession()).completionStatus, "completed");
   });
+  await t.test("legacy organize progress migrates into the combined learning stage", async (t) => {
+    installEnvironment(t);
+    const storage = await freshStorageModule();
+    const card = TASK_CARDS.find((item) => item.id === "VID-002");
+    const active = {
+      ...activeSession("legacy-organize", card),
+      stage: "organize",
+      stageIndex: 1,
+      stageDurations: { research: 120, organize: 90 },
+      extendedStages: { organize: 60 },
+      researchChecks: Object.fromEntries(card.researchPrompts.map((prompt) => [prompt, true])),
+      userNotes: Object.fromEntries(card.organizingTemplate.slice(0, 3).map((key) => [key, "legacy note"])),
+    };
+    await storage.saveActiveSession(active);
+    const restored = await storage.loadActiveSession();
+    assert.equal(restored.stage, "research");
+    assert.equal(restored.stageIndex, 0);
+    assert.equal(restored.stageDurations.research, 210);
+    assert.equal(restored.extendedStages.research, 60);
+    assert.equal(restored.userNotes[card.organizingTemplate[0]], "legacy note");
+  });
 
   await t.test("fallback archival retains only the newest MAX_SESSIONS records", async (t) => {
     const sessions = Array.from({ length: 10_000 }, (_, index) => ({ sessionId: `old-${index}` }));

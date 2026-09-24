@@ -13,6 +13,7 @@
   --page: #f3f5f2;
   --surface: #ffffff;
   --surface-alt: #edf1ed;
+  --surface-muted: #f7f9f6;
   --line: #d8dfda;
   --line-strong: #bdc8c1;
   --primary: #174f55;
@@ -3661,5 +3662,180 @@ th {
 
   .app-shell.is-training + .toast-region {
     bottom: 12px;
+  }
+}
+
+/* Learning and structured speaking workbench */
+.learning-route,
+.research-plan,
+.structure-guide,
+.speaking-outline {
+  display: grid;
+  gap: 12px;
+}
+
+.learning-route {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.learning-route li,
+.research-plan article,
+.structure-guide article,
+.speaking-outline article {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 16px;
+}
+
+.learning-route li,
+.structure-guide article {
+  display: flex;
+  gap: 10px;
+}
+
+.learning-route li > span,
+.structure-guide article > span,
+.speaking-outline article > div > span {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--surface);
+  font-weight: 800;
+}
+
+.learning-route p,
+.research-plan dl,
+.structure-guide p,
+.structure-guide small,
+.speaking-outline p,
+.speaking-outline blockquote {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.research-plan article label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-weight: 700;
+}
+
+.research-plan dl {
+  display: grid;
+  gap: 5px;
+  margin-left: 28px;
+}
+
+.research-plan dl div {
+  display: grid;
+  grid-template-columns: 74px 1fr;
+  gap: 8px;
+}
+
+.research-plan dt {
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+.research-plan dd {
+  margin: 0;
+}
+
+.structure-guide {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.structure-guide strong,
+.speaking-outline strong {
+  display: block;
+}
+
+.analogous-example {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-muted);
+  padding: 14px 16px;
+}
+
+.analogous-example summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.analogous-example ol {
+  display: grid;
+  gap: 8px;
+  padding-left: 22px;
+}
+
+.analogous-example li {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.analogous-example li span {
+  color: var(--muted);
+}
+
+.outline-panel {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+
+.speaking-outline article {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.35fr) minmax(0, 1fr);
+  align-items: start;
+  column-gap: 16px;
+}
+
+.speaking-outline article > div {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  grid-row: 1 / span 2;
+}
+
+.speaking-outline blockquote {
+  margin-left: 0;
+  border-left: 3px solid var(--accent);
+  padding-left: 12px;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .learning-route,
+  .structure-guide {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .speaking-outline article {
+    grid-template-columns: 1fr;
+  }
+
+  .speaking-outline article > div {
+    grid-row: auto;
+  }
+
+  .analogous-example li,
+  .research-plan dl div {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 }

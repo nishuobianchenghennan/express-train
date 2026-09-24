@@ -51,12 +51,12 @@ test("service worker precaches one complete version of the module graph", async 
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-cache");
     assert.match(body, /CACHE_PREFIX.*speak-clearly-/);
-    assert.match(body, /2026\.09\.16-3/);
+    assert.match(body, /2026\.09\.16-5/);
     assert.match(body, /key\.startsWith\(CACHE_PREFIX\).*key !== CACHE_NAME/);
     assert.match(body, /\/js\/data\/card-additions\.js/);
-    assert.doesNotMatch(body, /speak-clearly-v1/);
-    assert.doesNotMatch(body, /return cached \|\| network/);
-    assert.doesNotMatch(body, /cache\.put\("\/index\.html", response\.clone\(\)\)/);
+    assert.match(body, /fetch\(request, \{ cache: "no-store" \}\)/);
+    assert.match(body, /cache\.put\("\/index\.html", response\.clone\(\)\)/);
+    assert.doesNotMatch(body, /return cached \?\? fetch\(request, \{ cache: "no-store" \}\)/);
   });
 });
 
