@@ -3818,6 +3818,93 @@ th {
 }
 
 @media (max-width: 900px) {
+
+.prompt-execution {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.prompt-execution p {
+  margin: 0 0 6px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.prompt-execution ol {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 22px;
+}
+
+.prompt-execution li {
+  padding-left: 3px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.prompt-execution li b {
+  margin-right: 6px;
+  color: var(--ink);
+}
+
+.final-expression-guide {
+  background: var(--surface-muted);
+}
+
+.final-expression-list {
+  display: grid;
+  gap: 14px;
+}
+
+.final-expression-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 16px;
+}
+
+.final-expression-card h4 {
+  margin: 0;
+  color: var(--ink);
+}
+
+.final-expression-card p {
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.final-expression-card blockquote {
+  margin: 10px 0;
+  border-left: 3px solid var(--accent);
+  padding: 10px 12px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  line-height: 1.75;
+  white-space: normal;
+}
+
+.final-expression-card details {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.final-expression-card summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+.final-expression-card ol {
+  display: grid;
+  gap: 5px;
+  padding-left: 22px;
+}
   .learning-route,
   .structure-guide {
     grid-template-columns: 1fr;

@@ -70,6 +70,12 @@ test("analogous example formatter remains in module scope", async () => {
   assert.equal(source.match(/function analogousExampleLine\(/g)?.length, 1);
 });
 
+test("modal form controls are not treated as backdrop close actions", async () => {
+  const source = await readFile(new URL("../public/js/app.js", import.meta.url), "utf8");
+  assert.match(source, /explicitModalControl = event\.target\.closest\("\[data-modal-panel\] \[data-action\]"\)/);
+  assert.match(source, /state\.modal && modalPanel\?\.contains\(event\.target\) && !explicitModalControl/);
+});
+
 test("browser routes fall back to the application shell", async () => {
   await withServer(async (baseUrl) => {
     const response = await fetch(`${baseUrl}/history`, {

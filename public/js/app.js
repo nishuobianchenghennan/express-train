@@ -753,6 +753,24 @@ function learningDirection(card, prompt, index) {
   const [goal, query, capture] = directions[index % directions.length];
   return { prompt, goal, query, capture };
 }
+function promptExecutionGuide(card, index) {
+  const stages = [
+    ["先宽搜", `搜索“${card.topicLabel} + 定义”，先看三个不同来源如何界定它。`],
+    ["再缩小", `加入“${card.topicLabel} + ${index % 2 ? "机制 / 影响" : "适用对象 / 条件"}”，只保留与本题受众有关的内容。`],
+    ["核对来源", "检查作者或机构、发布日期、证据方法、适用对象，以及它是否承认限制。"],
+    ["做记录", "用四行写下：它说了什么、支持哪句话、不能证明什么、我还需要查什么。"],
+  ];
+  return `<div class="prompt-execution"><p><strong>具体执行顺序</strong></p><ol>${stages.map(([label, text]) => `<li><b>${escapeHtml(label)}</b><span>${escapeHtml(text)}</span></li>`).join("")}</ol></div>`;
+}
+
+function idealExpressionForPrompt(card, prompt, index) {
+  const role = ["先定义范围", "解释机制", "给出证据", "处理反方与边界"][index % 4];
+  return `<article class="final-expression-card"><h4>问题 ${index + 1}：${escapeHtml(prompt)}</h4><p><strong>在最终表达中的作用：</strong>${escapeHtml(role)}，不要把搜索结果逐条朗读。</p><blockquote>“关于${escapeHtml(card.topicLabel)}，我先把问题限定为【${escapeHtml(prompt)}中的具体范围】。我的暂定判断是【你的判断】，因为【机制或理由】。目前最直接的依据是【来源与证据】，但它不能说明【证据边界】。如果【反方条件】出现，这个判断需要调整。因此，面向${escapeHtml(card.audience)}，更合适的下一步是【行动或结论】。”</blockquote><details><summary>这段话是怎样形成的</summary><ol><li>用这个问题确定要查的范围。</li><li>用来源卡把事实与解释分开。</li><li>从证据中提炼一个有限判断。</li><li>主动加入反方、限制和不确定性。</li><li>根据受众和沟通目的收束成行动或条件化结论。</li></ol></details></article>`;
+}
+
+function renderFinalExpressionGuide(card) {
+  return `<section class="workspace-section final-expression-guide"><div class="section-heading"><div><p class="eyebrow">最后一步 · 先看清楚如何表达</p><h2>每个学习问题如何进入最终表达</h2><p>这是结构化示范，不是当前题目的事实答案。把中括号替换成你自己检索、核验和判断后的内容。</p></div></div><div class="final-expression-list">${card.researchPrompts.map((prompt, index) => idealExpressionForPrompt(card, prompt, index)).join("")}</div></section>`;
+}
 
 function analogousScenario(protocol) {
   return {
@@ -797,10 +815,11 @@ function renderResearch(session, card) {
   const filled = card.organizingTemplate.filter((item) => session.userNotes?.[item]?.trim()).length;
   const body = `
     <section class="stage-intro learning-stage-intro"><p class="eyebrow">学习、判断、整理在同一阶段完成</p><h2>${escapeHtml(card.title)}</h2><p>${escapeHtml(card.context)}</p><ol class="learning-route"><li><span>1</span><div><strong>拆解学习问题</strong><p>明确要学什么、用什么关键词搜索、最终记录什么。</p></div></li><li><span>2</span><div><strong>建立证据卡</strong><p>记录来源及其真正支持的判断。</p></div></li><li><span>3</span><div><strong>形成有限观点</strong><p>填写判断、理由、证据、反方和边界。</p></div></li><li><span>4</span><div><strong>映射成表达骨架</strong><p>把笔记放入结构节点，形成口头提纲。</p></div></li></ol></section>
-    <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 1 步</p><h2>按问题学习，而不是漫无目的搜索</h2><p>每处理完一项再勾选，并留下可供观点整理的信息。</p></div><span class="count-badge" data-research-count>${Object.values(session.researchChecks ?? {}).filter(Boolean).length} / ${card.researchPrompts.length}</span></div><div class="research-plan">${card.researchPrompts.map((prompt, index) => { const direction = learningDirection(card, prompt, index); return `<article><label><input type="checkbox" data-research-prompt="${index}"${checked(session.researchChecks?.[prompt])}><span><b>问题 ${index + 1}</b>${escapeHtml(prompt)}</span></label><dl><div><dt>学习目标</dt><dd>${escapeHtml(direction.goal)}</dd></div><div><dt>检索方向</dt><dd>${escapeHtml(direction.query)}</dd></div><div><dt>完成产物</dt><dd>${escapeHtml(direction.capture)}</dd></div></dl></article>`; }).join("")}</div></section>
+    <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 1 步</p><h2>按问题学习，而不是漫无目的搜索</h2><p>每处理完一项再勾选，并留下可供观点整理的信息。</p></div><span class="count-badge" data-research-count>${Object.values(session.researchChecks ?? {}).filter(Boolean).length} / ${card.researchPrompts.length}</span></div><div class="research-plan">${card.researchPrompts.map((prompt, index) => { const direction = learningDirection(card, prompt, index); return `<article><label><input type="checkbox" data-research-prompt="${index}"${checked(session.researchChecks?.[prompt])}><span><b>问题 ${index + 1}</b>${escapeHtml(prompt)}</span></label><dl><div><dt>学习目标</dt><dd>${escapeHtml(direction.goal)}</dd></div><div><dt>检索方向</dt><dd>${escapeHtml(direction.query)}</dd></div><div><dt>完成产物</dt><dd>${escapeHtml(direction.capture)}</dd></div></dl>${promptExecutionGuide(card, index)}</article>`; }).join("")}</div></section>
     <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 2 步</p><h2>${requiresSources ? "把检索结果变成证据卡" : "核对事实、观察与边界"}</h2><p>${requiresSources ? "至少保留两个来源；每张卡写清它支持哪一句、不能证明什么。" : "把已知事实、个人观察和推测分开。"}</p></div>${requiresSources ? `<button class="button button-secondary" type="button" data-action="add-source">${icon("plus")}添加证据卡</button>` : ""}</div>${requiresSources ? `<div class="source-list">${sourceRows.length ? sourceRows.map((source, index) => renderSourceRow(source, index)).join("") : `<div class="empty-inline"><p>还没有证据卡。</p><button class="button button-secondary" type="button" data-action="add-source">${icon("plus")}添加第一张证据卡</button></div>`}</div>` : `<div class="boundary-note">${card.sourceRequirements.map((item) => `<p>${icon("check")}<span>${escapeHtml(item)}</span></p>`).join("")}</div>`}<label class="confirmation-check"><input type="checkbox" data-session-field="sourceRequirementsMet"${checked(session.sourceRequirementsMet)}><span>我已区分事实、来源观点和个人推测，并写下至少一个反方或适用边界。</span></label></section>
     <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 3 步</p><h2>把材料转成自己的有限观点</h2><p>每格先写判断，再补“因为—证据—但是”。</p></div><span class="count-badge" data-organize-count>${filled} / ${card.organizingTemplate.length}</span></div><div class="notes-grid">${card.organizingTemplate.map((item, index) => `<label class="field note-field"><span><b>${index + 1}</b>${escapeHtml(item)}</span><textarea rows="5" data-note-key="${escapeHtml(item)}" placeholder="判断：……\n因为：……\n证据或例子：……\n但是/边界：……">${escapeHtml(session.userNotes?.[item] ?? "")}</textarea></label>`).join("")}</div></section>
     <section class="workspace-section learning-step structure-workbench"><div class="section-heading"><div><p class="eyebrow">第 4 步</p><h2>把观点映射成 ${escapeHtml(card.structureName)}</h2><p>示例只展示信息角色和排序，不提供当前命题答案。</p></div></div><div class="structure-guide">${card.structureSteps.map((step, index) => { const [action, starter] = stepGuidance(step); return `<article><span>${index + 1}</span><div><strong>${escapeHtml(step)}</strong><p>${escapeHtml(action)}</p><small>${escapeHtml(starter)}</small></div></article>`; }).join("")}</div><details class="analogous-example"><summary>${icon("info")}相似结构示例：${escapeHtml(analogousScenario(card.protocol))}</summary><p>只模仿信息顺序，不复制示例立场、事实或结论。</p><ol>${card.structureSteps.map((step) => `<li><strong>${escapeHtml(step)}</strong><span>${escapeHtml(analogousExampleLine(step, card.protocol))}</span></li>`).join("")}</ol></details><div class="outline-panel"><div class="section-heading"><div><h3>你的结构化表达骨架</h3><p>系统只把你的笔记放进结构，不代写主题答案。请将占位句改成自己的口语。</p></div></div><div data-speaking-outline>${renderSpeakingOutline(session, card)}</div></div></section>
+    ${renderFinalExpressionGuide(card)}
     <section class="organize-check" data-organize-check><h3>进入表达前的检查</h3>${organizeWarnings(session, card).map((item) => `<p>${icon("info")}<span>${escapeHtml(item)}</span></p>`).join("")}</section>
     ${renderHelp(session, card)}
     <div class="action-bar"><button class="button button-ghost" type="button" data-action="open-abandon">结束并记录未完成</button><button class="button button-primary" type="button" data-action="advance-stage">带着表达骨架进入第一次表达${icon("arrowRight")}</button></div>
@@ -1818,7 +1837,12 @@ async function startFocusTraining() {
 }
 
 root.addEventListener("click", async (event) => {
-  const control = event.target.closest("[data-action]");
+  const modalPanel = root.querySelector("[data-modal-panel]");
+  const explicitModalControl = event.target.closest("[data-modal-panel] [data-action]");
+  if (state.modal && modalPanel?.contains(event.target) && !explicitModalControl) {
+    return;
+  }
+  const control = explicitModalControl ?? event.target.closest("[data-action]");
   if (!control) {
     return;
   }
