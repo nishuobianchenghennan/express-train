@@ -207,18 +207,18 @@ export function selectTask({
   };
 }
 
-export function createDrawSequence({ cards, winner, requestedScene = winner?.scene, length = 12, random = Math.random } = {}) {
+export function createDrawSequence({ cards, winner, requestedScene = null, length = 12, random = Math.random } = {}) {
   if (!winner?.id || !Number.isInteger(length) || length < 3) {
     throw new Error("抽题轮播需要获选题卡和至少三个位置");
   }
   const pool = cards.filter(
     (card) =>
       card.status === "active" &&
-      card.scene === requestedScene &&
+      (!requestedScene || card.scene === requestedScene) &&
       card.id !== winner.id,
   );
   if (pool.length === 0) {
-    throw new Error("当前场景没有足够的轮播候选题卡");
+    throw new Error("当前范围没有足够的轮播候选题卡");
   }
   const winnerIndex = length - 2;
   const sequence = [];

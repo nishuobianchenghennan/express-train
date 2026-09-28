@@ -149,6 +149,20 @@ test("topic draw sequence stays in the requested scene and lands on the selected
   assert.equal(draw.cards.slice(1, draw.winnerIndex).some((card, index) => card.id === draw.cards[index].id), false);
 });
 
+test("balanced topic draw spans scenes and still lands on the fixed winner", () => {
+  const winner = TASK_CARDS.find((card) => card.id === "IMP-001");
+  const draw = createDrawSequence({
+    cards: TASK_CARDS,
+    winner,
+    requestedScene: null,
+    length: 12,
+    random: createSeededRandom(23),
+  });
+  assert.equal(draw.cards[draw.winnerIndex].id, winner.id);
+  assert.equal(draw.cards.filter((card) => card.id === winner.id).length, 1);
+  assert.ok(new Set(draw.cards.map((card) => card.scene)).size > 1);
+});
+
 test("sessions preserve repeatable sensitive-task skips without consuming the normal swap", () => {
   const card = TASK_CARDS.find((item) => item.sensitiveFlags.length > 0);
   const session = createSession(card, {

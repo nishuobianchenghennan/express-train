@@ -4025,8 +4025,16 @@ th {
   will-change: transform;
 }
 
+.topic-draw-track.is-idle {
+  animation: topic-draw-marquee 30s linear infinite;
+}
+
+.topic-draw-window:hover .topic-draw-track.is-idle {
+  animation-play-state: paused;
+}
+
 .topic-draw-track.is-spinning {
-  animation: topic-draw-roll 2.4s cubic-bezier(0.12, 0.72, 0.12, 1) forwards;
+  animation: topic-draw-roll 5s linear forwards;
 }
 
 .topic-draw-track.is-settled {
@@ -4077,23 +4085,39 @@ th {
   box-shadow: 0 0 0 2px var(--accent-soft), 0 10px 24px rgb(217 95 69 / 16%);
 }
 
-@keyframes topic-draw-roll {
-  0% {
+@keyframes topic-draw-marquee {
+  from {
     transform: translate3d(0, 0, 0);
   }
 
-  18% {
-    transform: translate3d(-464px, 0, 0);
+  to {
+    transform: translate3d(var(--idle-offset), 0, 0);
   }
+}
 
-  100% {
-    transform: translate3d(var(--draw-offset), 0, 0);
-  }
+@keyframes topic-draw-roll {
+  0% { transform: translate3d(0, 0, 0); }
+  8% { transform: translate3d(var(--draw-p1), 0, 0); }
+  20% { transform: translate3d(var(--draw-p2), 0, 0); }
+  34% { transform: translate3d(var(--draw-p3), 0, 0); }
+  48% { transform: translate3d(var(--draw-p4), 0, 0); }
+  60% { transform: translate3d(var(--draw-p5), 0, 0); }
+  72% { transform: translate3d(var(--draw-p6), 0, 0); }
+  82% { transform: translate3d(var(--draw-p7), 0, 0); }
+  90% { transform: translate3d(var(--draw-p8), 0, 0); }
+  96% { transform: translate3d(var(--draw-p9), 0, 0); }
+  100% { transform: translate3d(var(--draw-offset), 0, 0); }
 }
 
 html.reduce-motion .topic-draw-track {
   animation: none !important;
   transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topic-draw-track {
+    animation: none !important;
+  }
 }
 
 @media (max-width: 640px) {

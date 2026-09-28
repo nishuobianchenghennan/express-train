@@ -52,7 +52,7 @@ test("service worker precaches one complete version of the module graph", async 
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-cache");
     assert.match(body, /CACHE_PREFIX.*speak-clearly-/);
-    assert.match(body, /2026\.09\.16-7/);
+    assert.match(body, /2026\.09\.28-9/);
     assert.match(body, /key\.startsWith\(CACHE_PREFIX\).*key !== CACHE_NAME/);
     assert.match(body, /\/js\/data\/card-additions\.js/);
     assert.match(body, /fetch\(request, \{ cache: "no-store" \}\)/);
@@ -76,14 +76,23 @@ test("modal form controls are not treated as backdrop close actions", async () =
   assert.match(source, /state\.modal && modalPanel\?\.contains\(event\.target\) && !explicitModalControl/);
 });
 
-test("scene selection uses a two-step topic draw before starting a session", async () => {
-  const source = await readFile(new URL("../public/js/app.js", import.meta.url), "utf8");
-  assert.match(source, /async function runTopicDraw/);
-  assert.match(source, /window\.matchMedia\?\.\("\(prefers-reduced-motion: reduce\)"\)\.matches/);
-  assert.match(source, /status: reducedMotion \? "settled" : "spinning"/);
-  assert.match(source, /draw\?\.status === "settled" \? cardMap\.get\(draw\.winnerId\) : null/);
-  assert.match(source, /void runTopicDraw\(\)\.catch/);
-  assert.match(source, /else if \(state\.homeScene\) \{\s*await startDrawnTopic\(\)/);
+test("all home choices use one five-second topic draw result before starting a session", async () => {
+  const [source, styles] = await Promise.all([
+    readFile(new URL("../public/js/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /const TOPIC_DRAW_DURATION_MS = 5_000/);
+  assert.match(source, /function idleTopicCards\(scene\)/);
+  assert.match(source, /!state\.activeSession \? renderTopicDraw\(draw\) : ""/);
+  assert.match(source, /function resolveHomeSelection/);
+  assert.match(source, /winnerId: selection\.card\.id/);
+  assert.match(source, /status === "settled" && index === winnerIndex/);
+  assert.match(source, /annualPlanDate: draw\.annualPlanDate/);
+  assert.match(source, /annualPlanDayNumber: draw\.annualPlanDayNumber/);
+  assert.match(styles, /animation: topic-draw-roll 5s linear forwards/);
+  assert.match(styles, /48% \{ transform: translate3d\(var\(--draw-p4\)/);
+  assert.match(styles, /96% \{ transform: translate3d\(var\(--draw-p9\)/);
+  assert.match(styles, /100% \{ transform: translate3d\(var\(--draw-offset\)/);
 });
 
 test("browser routes fall back to the application shell", async () => {

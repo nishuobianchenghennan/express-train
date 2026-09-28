@@ -50,6 +50,7 @@ const generalMetricIds = Object.entries(METRICS)
   .filter(([, metric]) => metric.general)
   .map(([id]) => id);
 const ANNUAL_PLAN_SEED = 42;
+const TOPIC_DRAW_DURATION_MS = 5_000;
 const annualPlanCache = new Map();
 const sensitiveFlagLabels = Object.freeze({
   finance: "财务与金钱",
@@ -512,23 +513,40 @@ function currentTopicDraw() {
   return draw && draw.scene === state.homeScene && draw.mode === state.homeMode ? draw : null;
 }
 
+function idleTopicCards(scene) {
+  if (!scene) {
+    const plan = annualPlanForDate();
+    const entry = annualEntryForDate();
+    const start = Math.max(0, (entry?.dayNumber ?? 1) - 1);
+    return Array.from({ length: 8 }, (_, index) => plan[(start + index * 43) % plan.length].card);
+  }
+  const pool = TASK_CARDS.filter((card) => card.status === "active" && card.scene === scene);
+  const step = Math.max(1, Math.floor(pool.length / 8));
+  return Array.from({ length: Math.min(8, pool.length) }, (_, index) => pool[(index * step) % pool.length]);
+}
+
 function renderTopicDraw(draw) {
-  const idleCards = TASK_CARDS.filter((card) => card.status === "active" && card.scene === state.homeScene).slice(0, 8);
-  const cards = draw ? draw.cardIds.map((id) => cardMap.get(id)).filter(Boolean) : idleCards;
+  const idleBase = idleTopicCards(state.homeScene);
+  const cards = draw ? draw.cardIds.map((id) => cardMap.get(id)).filter(Boolean) : [...idleBase, ...idleBase];
   const winnerIndex = draw?.winnerIndex ?? -1;
   const offset = winnerIndex > 0 ? winnerIndex * 232 : 0;
+  const motionStyle = [0.015, 0.08, 0.24, 0.48, 0.67, 0.81, 0.9, 0.95, 0.985]
+    .map((ratio, index) => `--draw-p${index + 1}: -${Math.round(offset * ratio)}px`)
+    .join("; ");
+  const idleOffset = idleBase.length * 232;
   const status = draw?.status ?? "idle";
+  const scopeLabel = state.homeScene ? SCENES[state.homeScene]?.label ?? "指定场景" : "均衡推荐";
   const statusText = status === "spinning"
-    ? "题目正在轮转…"
+    ? "先加速浏览候选，再减速定格（约 5 秒）"
     : status === "settled"
       ? "已定格，确认后进入训练"
-      : `已选择${SCENES[state.homeScene]?.label ?? "指定"}场景，点击开始抽题`;
+      : `${scopeLabel}话题持续轮转，点击开始抽题`;
   return `<section class="topic-draw topic-draw-${status}" aria-label="题目抽取">
     <div class="topic-draw-head"><span>${icon("shuffle")}场景题目轮盘</span><strong aria-live="polite">${escapeHtml(statusText)}</strong></div>
     <div class="topic-draw-window">
       <div class="topic-draw-marker" aria-hidden="true"></div>
-      <div class="topic-draw-track${status === "spinning" ? " is-spinning" : status === "settled" ? " is-settled" : ""}" style="--draw-offset: -${offset}px">
-        ${cards.map((card, index) => `<article class="topic-draw-card${index === winnerIndex ? " is-winner" : ""}"><div><span class="scene-tag scene-${card.scene}">${escapeHtml(card.sceneLabel)}</span><span>L${card.difficulty}</span></div><strong>${escapeHtml(card.topicLabel)}</strong><p>${escapeHtml(card.title)}</p></article>`).join("")}
+      <div class="topic-draw-track${status === "idle" ? " is-idle" : status === "spinning" ? " is-spinning" : " is-settled"}" style="--draw-offset: -${offset}px; --idle-offset: -${idleOffset}px; ${motionStyle}">
+        ${cards.map((card, index) => `<article class="topic-draw-card${status === "settled" && index === winnerIndex ? " is-winner" : ""}"><div><span class="scene-tag scene-${card.scene}">${escapeHtml(card.sceneLabel)}</span><span>L${card.difficulty}</span></div><strong>${escapeHtml(card.topicLabel)}</strong><p>${escapeHtml(card.title)}</p></article>`).join("")}
       </div>
     </div>
   </section>`;
@@ -547,24 +565,25 @@ function renderHome() {
     ? state.activeSession.stage === "complete" ? "今天的训练已完成" : "有一项训练等待继续"
     : draw?.status === "spinning" ? "看看题目会停在哪里"
       : draw?.status === "settled" ? "本轮题目已经抽出"
-        : completedToday > 0 ? "今日闭环已完成" : "今天，讲明白一件事";
-  let primaryAction;
-  if (state.activeSession) {
-    primaryAction = `<button class="button button-primary button-large" type="button" data-action="resume-session">${icon(state.activeSession.stage === "complete" ? "chart" : "play")}<span>${state.activeSession.stage === "complete" ? "查看本次总结" : `继续${escapeHtml(stageLabel(state.activeSession.protocol, state.activeSession.stage))}`}</span></button>`;
-  } else if (state.homeScene) {
-    primaryAction = `<button class="button button-primary button-large" type="button" data-action="start-home"${draw?.status === "spinning" ? " disabled" : ""}>${icon(draw?.status === "settled" ? "play" : "shuffle")}<span>${draw?.status === "settled" ? "开始这张训练" : draw?.status === "spinning" ? "正在抽题" : "开始抽题"}</span></button>`;
-  } else {
-    primaryAction = `<button class="button button-primary button-large" type="button" data-action="start-home">${icon("play")}<span>${completedToday > 0 ? "再练一题" : "开始今日训练"}</span></button>`;
-  }
+        : completedToday > 0 ? "今日闭环已完成" : "话题持续轮转中";
+  const primaryAction = state.activeSession
+    ? `<button class="button button-primary button-large" type="button" data-action="resume-session">${icon(state.activeSession.stage === "complete" ? "chart" : "play")}<span>${state.activeSession.stage === "complete" ? "查看本次总结" : `继续${escapeHtml(stageLabel(state.activeSession.protocol, state.activeSession.stage))}`}</span></button>`
+    : `<button class="button button-primary button-large" type="button" data-action="start-home"${draw?.status === "spinning" ? " disabled" : ""}>${icon(draw?.status === "settled" ? "play" : "shuffle")}<span>${draw?.status === "settled" ? "开始这张训练" : draw?.status === "spinning" ? "正在抽题" : "开始抽题"}</span></button>`;
+  const scopeText = state.homeScene
+    ? `${escapeHtml(SCENES[state.homeScene]?.label ?? "指定场景")} · 自适应抽题`
+    : `均衡推荐 · 年度第 ${annualEntry?.dayNumber ?? "—"} / 365 题`;
+  const idleDescription = state.homeScene
+    ? "轮盘持续展示所选场景的话题；点击后由自适应算法定格本轮题目。"
+    : "轮盘持续展示跨场景话题；点击后定格到今日年度固定计划题。";
 
   const content = `
-    <div class="page-heading"><div><p class="eyebrow">今日训练</p><h1>${statusTitle}</h1><p>${state.activeSession ? escapeHtml(activeCard?.title ?? state.activeSession.title) : "从场景化任务卡出发，自行搜索、组织、表达、复盘并立即重讲。"}</p></div><div class="streak-box"><span>连续完成</span><strong>${stats.streak.current}</strong><small>天 · 最长 ${stats.streak.best} 天</small></div></div>
+    <div class="page-heading"><div><p class="eyebrow">今日训练</p><h1>${statusTitle}</h1><p>${state.activeSession ? escapeHtml(activeCard?.title ?? state.activeSession.title) : "从不断轮转的话题中抽出本轮任务，再完成检索、组织、表达、复盘和重讲。"}</p></div><div class="streak-box"><span>连续完成</span><strong>${stats.streak.current}</strong><small>天 · 最长 ${stats.streak.best} 天</small></div></div>
     <section class="today-workspace" aria-labelledby="today-title">
       <div class="today-copy">
-        <div class="status-line"><span class="status-badge ${state.activeSession ? "status-active" : draw?.status === "settled" ? "status-done" : "status-ready"}">${state.activeSession ? "进行中" : draw?.status === "settled" ? "已抽取" : "待开始"}</span><span>${state.activeSession ? `${escapeHtml(activeCard?.sceneLabel ?? "训练")} · ${state.activeSession.mode === "quick" ? "快速模式" : "完整闭环"}` : state.homeScene ? `${escapeHtml(SCENES[state.homeScene]?.label ?? "指定场景")} · 自适应抽题` : `年度第 ${annualEntry?.dayNumber ?? "—"} / 365 题 · 本地固定计划`}</span></div>
-        <h2 id="today-title">${state.activeSession ? escapeHtml(activeCard?.topicLabel ?? state.activeSession.topicLabel) : drawnCard ? escapeHtml(drawnCard.title) : state.homeScene ? "横向轮转，从这个场景抽出本轮题目" : escapeHtml(annualEntry?.card.topicLabel ?? "系统规定路径，你完成思考")}</h2>
-        <p>${state.activeSession ? `进度已自动保存在当前设备。预计总时长 ${totalEstimatedMinutes(state.activeSession)} 分钟。` : drawnCard ? `定格话题：${escapeHtml(drawnCard.topicLabel)}。结果来自难度、近期覆盖和重复约束，不是纯随机。` : state.homeScene ? "先选模式，再点击开始抽题；轨道会在同场景题目中轮转并定格。" : `今日题来自 365 张固定题库；同一年、同一天在本设备上始终一致。${annualEntry ? ` 今日场景：${escapeHtml(annualEntry.card.sceneLabel)}。` : ""}`}</p>
-        ${!state.activeSession && state.homeScene ? renderTopicDraw(draw) : ""}
+        <div class="status-line"><span class="status-badge ${state.activeSession ? "status-active" : draw?.status === "settled" ? "status-done" : "status-ready"}">${state.activeSession ? "进行中" : draw?.status === "settled" ? "已抽取" : "轮转中"}</span><span>${state.activeSession ? `${escapeHtml(activeCard?.sceneLabel ?? "训练")} · ${state.activeSession.mode === "quick" ? "快速模式" : "完整闭环"}` : scopeText}</span></div>
+        <h2 id="today-title">${state.activeSession ? escapeHtml(activeCard?.topicLabel ?? state.activeSession.topicLabel) : drawnCard ? escapeHtml(drawnCard.title) : "横向轮转中，点击抽取本轮表达题目"}</h2>
+        <p>${state.activeSession ? `进度已自动保存在当前设备。预计总时长 ${totalEstimatedMinutes(state.activeSession)} 分钟。` : drawnCard ? `定格话题：${escapeHtml(drawnCard.topicLabel)}。点击“开始这张训练”进入同一题目。` : idleDescription}</p>
+        ${!state.activeSession ? renderTopicDraw(draw) : ""}
       </div>
       <div class="today-controls">${state.activeSession ? "" : renderModeSelector(state.homeMode)}${state.activeSession ? "" : renderSceneSelect(state.homeScene)}${primaryAction}${state.activeSession && state.activeSession.stage !== "complete" ? `<button class="button button-ghost" type="button" data-action="open-abandon">${icon("x")}结束并记录未完成</button>` : ""}</div>
     </section>
@@ -1342,6 +1361,8 @@ async function startNewSession(card, options = {}) {
   const nextSession = createSession(card, {
     mode: options.mode ?? state.homeMode,
     selectionReason: options.selectionReason ?? "指定题卡",
+    annualPlanDate: options.annualPlanDate,
+    annualPlanDayNumber: options.annualPlanDayNumber,
   });
   await saveActiveNow(nextSession);
   state.activeSession = nextSession;
@@ -1352,17 +1373,50 @@ function prefersReducedMotion() {
   return state.settings.reducedMotion || Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
 }
 
+function resolveHomeSelection({ requestedScene = state.homeScene } = {}) {
+  if (requestedScene) {
+    const result = selectTask({
+      cards: TASK_CARDS,
+      history: state.sessions,
+      settings: state.settings,
+      requestedScene,
+    });
+    return {
+      card: result.card,
+      selectionReason: result.reason,
+      annualPlanDate: null,
+      annualPlanDayNumber: null,
+    };
+  }
+  const annualPlanDate = dateKey(new Date());
+  const entry = annualEntryForDate(annualPlanDate);
+  if (!entry) {
+    throw new Error("今天没有可用的年度题卡");
+  }
+  const repeatedToday = state.sessions.some(
+    (session) =>
+      session.completionStatus === "completed" &&
+      dateKey(session.completedAt) === annualPlanDate &&
+      (session.annualPlanDate === annualPlanDate || session.selectionReason?.startsWith("年度固定计划")),
+  );
+  const reasonParts = ["年度固定计划"];
+  if (entry.date !== annualPlanDate) reasonParts.push("闰日加练");
+  if (repeatedToday) reasonParts.push("当日加练");
+  reasonParts.push(`第 ${entry.dayNumber} / 365 题`, annualPlanDate);
+  return {
+    card: entry.card,
+    selectionReason: reasonParts.join(" · "),
+    annualPlanDate,
+    annualPlanDayNumber: entry.dayNumber,
+  };
+}
+
 async function runTopicDraw({ requestedScene = state.homeScene, mode = state.homeMode } = {}) {
-  const result = selectTask({
-    cards: TASK_CARDS,
-    history: state.sessions,
-    settings: state.settings,
-    requestedScene,
-  });
+  const selection = resolveHomeSelection({ requestedScene });
   const sequence = createDrawSequence({
     cards: TASK_CARDS,
-    winner: result.card,
-    requestedScene,
+    winner: selection.card,
+    requestedScene: requestedScene || null,
   });
   const reducedMotion = prefersReducedMotion();
   const revision = ++topicDrawRevision;
@@ -1370,22 +1424,20 @@ async function runTopicDraw({ requestedScene = state.homeScene, mode = state.hom
     scene: requestedScene,
     mode,
     status: reducedMotion ? "settled" : "spinning",
-    winnerId: result.card.id,
+    winnerId: selection.card.id,
     winnerIndex: sequence.winnerIndex,
     cardIds: sequence.cards.map((card) => card.id),
-    selectionReason: result.reason,
+    selectionReason: selection.selectionReason,
+    annualPlanDate: selection.annualPlanDate,
+    annualPlanDayNumber: selection.annualPlanDayNumber,
   };
-  state.pendingAnnouncement = reducedMotion ? `已抽中${result.card.title}` : "题目开始轮转";
+  state.pendingAnnouncement = reducedMotion ? `已抽中${selection.card.title}` : "题目开始轮转";
   render();
-  if (reducedMotion) {
-    return;
-  }
-  await new Promise((resolve) => setTimeout(resolve, 2_400));
-  if (revision !== topicDrawRevision || state.homeScene !== requestedScene || state.homeMode !== mode) {
-    return;
-  }
+  if (reducedMotion) return;
+  await new Promise((resolve) => setTimeout(resolve, TOPIC_DRAW_DURATION_MS));
+  if (revision !== topicDrawRevision || state.homeScene !== requestedScene || state.homeMode !== mode) return;
   state.topicDraw = { ...state.topicDraw, status: "settled" };
-  state.pendingAnnouncement = `已抽中${result.card.title}`;
+  state.pendingAnnouncement = `已抽中${selection.card.title}`;
   render();
 }
 
@@ -1397,63 +1449,11 @@ async function startDrawnTopic() {
     return;
   }
   await startNewSession(card, {
-    mode: state.homeMode,
+    mode: draw.mode,
     selectionReason: `${draw.selectionReason} · 场景轮盘定格`,
+    annualPlanDate: draw.annualPlanDate,
+    annualPlanDayNumber: draw.annualPlanDayNumber,
   });
-}
-
-async function selectAndStart({ requestedScene = state.homeScene, mode = state.homeMode } = {}) {
-  let card;
-  let selectionReason;
-  if (requestedScene) {
-    const result = selectTask({
-      cards: TASK_CARDS,
-      history: state.sessions,
-      settings: state.settings,
-      requestedScene,
-    });
-    card = result.card;
-    selectionReason = result.reason;
-  } else {
-    const annualPlanDate = dateKey(new Date());
-    const entry = annualEntryForDate(annualPlanDate);
-    if (!entry) {
-      throw new Error("今天没有可用的年度题卡");
-    }
-    card = entry.card;
-    const repeatedToday = state.sessions.some(
-      (session) =>
-        session.completionStatus === "completed" &&
-        dateKey(session.completedAt) === annualPlanDate &&
-        (session.annualPlanDate === annualPlanDate || session.selectionReason?.startsWith("年度固定计划")),
-    );
-    const reasonParts = ["年度固定计划"];
-    if (entry.date !== annualPlanDate) {
-      reasonParts.push("闰日加练");
-    }
-    if (repeatedToday) {
-      reasonParts.push("当日加练");
-    }
-    reasonParts.push(`第 ${entry.dayNumber} / 365 题`, annualPlanDate);
-    selectionReason = reasonParts.join(" · ");
-    const nextSession = createSession(card, {
-      mode,
-      selectionReason,
-      annualPlanDate,
-      annualPlanDayNumber: entry.dayNumber,
-    });
-    await saveActiveNow(nextSession);
-    state.activeSession = nextSession;
-    navigate("train");
-    return;
-  }
-  const nextSession = createSession(card, {
-    mode,
-    selectionReason,
-  });
-  await saveActiveNow(nextSession);
-  state.activeSession = nextSession;
-  navigate("train");
 }
 
 async function skipSensitiveTask() {
@@ -1936,12 +1936,10 @@ root.addEventListener("click", async (event) => {
     }
     render();
   } else if (action === "start-home") {
-    if (state.homeScene && currentTopicDraw()?.status !== "settled") {
+    if (currentTopicDraw()?.status !== "settled") {
       void runTopicDraw().catch((error) => showToast(error?.message || "抽题失败，请重试。", "danger"));
-    } else if (state.homeScene) {
-      await startDrawnTopic();
     } else {
-      await selectAndStart();
+      await startDrawnTopic();
     }
   } else if (action === "resume-session") {
     navigate("train");
