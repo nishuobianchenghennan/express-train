@@ -3817,7 +3817,6 @@ th {
   white-space: pre-wrap;
 }
 
-@media (max-width: 900px) {
 
 .prompt-execution {
   margin-top: 12px;
@@ -3905,6 +3904,7 @@ th {
   gap: 5px;
   padding-left: 22px;
 }
+@media (max-width: 900px) {
   .learning-route,
   .structure-guide {
     grid-template-columns: 1fr;
@@ -3924,5 +3924,185 @@ th {
   .research-plan dl div {
     display: grid;
     grid-template-columns: 1fr;
+  }
+}
+
+.topic-draw {
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.topic-draw-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.topic-draw-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--primary);
+  font-weight: 800;
+}
+
+.topic-draw-head .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.topic-draw-window {
+  position: relative;
+  min-height: 142px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  padding: 10px 6px;
+}
+
+.topic-draw-window::before,
+.topic-draw-window::after {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  width: 42px;
+  content: "";
+  pointer-events: none;
+}
+
+.topic-draw-window::before {
+  left: 0;
+  background: linear-gradient(90deg, var(--surface-alt), transparent);
+}
+
+.topic-draw-window::after {
+  right: 0;
+  background: linear-gradient(270deg, var(--surface-alt), transparent);
+}
+
+.topic-draw-marker {
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  bottom: 0;
+  left: 116px;
+  width: 2px;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.topic-draw-spinning .topic-draw-marker,
+.topic-draw-settled .topic-draw-marker {
+  opacity: 1;
+}
+
+.topic-draw-marker::before {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border-top: 8px solid var(--accent);
+  border-right: 6px solid transparent;
+  border-left: 6px solid transparent;
+  content: "";
+  transform: translateX(-50%);
+}
+
+.topic-draw-track {
+  display: flex;
+  width: max-content;
+  gap: 12px;
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+}
+
+.topic-draw-track.is-spinning {
+  animation: topic-draw-roll 2.4s cubic-bezier(0.12, 0.72, 0.12, 1) forwards;
+}
+
+.topic-draw-track.is-settled {
+  transform: translate3d(var(--draw-offset), 0, 0);
+}
+
+.topic-draw-card {
+  display: grid;
+  width: 220px;
+  min-height: 120px;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 13px;
+  box-shadow: 0 5px 16px rgb(25 42 40 / 6%);
+}
+
+.topic-draw-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.topic-draw-card > strong {
+  color: var(--primary);
+  font-size: 13px;
+}
+
+.topic-draw-card > p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.topic-draw-card.is-winner {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 10px 24px rgb(217 95 69 / 16%);
+}
+
+@keyframes topic-draw-roll {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+
+  18% {
+    transform: translate3d(-464px, 0, 0);
+  }
+
+  100% {
+    transform: translate3d(var(--draw-offset), 0, 0);
+  }
+}
+
+html.reduce-motion .topic-draw-track {
+  animation: none !important;
+  transition: none !important;
+}
+
+@media (max-width: 640px) {
+  .topic-draw-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .topic-draw-window {
+    min-height: 138px;
   }
 }

@@ -4,6 +4,7 @@ import {
   annualPlanAlternative,
   annualPlanEntryForDate,
   createAnnualPlan,
+  createDrawSequence,
   selectTask,
 } from "./core/selection.js";
 import {
@@ -84,6 +85,7 @@ const state = {
   view: "home",
   homeMode: "full",
   homeScene: "",
+  topicDraw: null,
   libraryFilters: { query: "", scene: "", domain: "", difficulty: "", favorites: "" },
   historyFilters: {
     query: "",
@@ -114,6 +116,7 @@ let pendingActiveSave = null;
 let activeSaveTail = Promise.resolve();
 let saveRevision = 0;
 let actionInFlight = false;
+let topicDrawRevision = 0;
 let clockTimer;
 let toastTimer;
 
@@ -499,6 +502,38 @@ function sceneCoverage(counts, days, compact = false) {
     .join("")}</div>`;
 }
 
+function resetTopicDraw() {
+  topicDrawRevision += 1;
+  state.topicDraw = null;
+}
+
+function currentTopicDraw() {
+  const draw = state.topicDraw;
+  return draw && draw.scene === state.homeScene && draw.mode === state.homeMode ? draw : null;
+}
+
+function renderTopicDraw(draw) {
+  const idleCards = TASK_CARDS.filter((card) => card.status === "active" && card.scene === state.homeScene).slice(0, 8);
+  const cards = draw ? draw.cardIds.map((id) => cardMap.get(id)).filter(Boolean) : idleCards;
+  const winnerIndex = draw?.winnerIndex ?? -1;
+  const offset = winnerIndex > 0 ? winnerIndex * 232 : 0;
+  const status = draw?.status ?? "idle";
+  const statusText = status === "spinning"
+    ? "题目正在轮转…"
+    : status === "settled"
+      ? "已定格，确认后进入训练"
+      : `已选择${SCENES[state.homeScene]?.label ?? "指定"}场景，点击开始抽题`;
+  return `<section class="topic-draw topic-draw-${status}" aria-label="题目抽取">
+    <div class="topic-draw-head"><span>${icon("shuffle")}场景题目轮盘</span><strong aria-live="polite">${escapeHtml(statusText)}</strong></div>
+    <div class="topic-draw-window">
+      <div class="topic-draw-marker" aria-hidden="true"></div>
+      <div class="topic-draw-track${status === "spinning" ? " is-spinning" : status === "settled" ? " is-settled" : ""}" style="--draw-offset: -${offset}px">
+        ${cards.map((card, index) => `<article class="topic-draw-card${index === winnerIndex ? " is-winner" : ""}"><div><span class="scene-tag scene-${card.scene}">${escapeHtml(card.sceneLabel)}</span><span>L${card.difficulty}</span></div><strong>${escapeHtml(card.topicLabel)}</strong><p>${escapeHtml(card.title)}</p></article>`).join("")}
+      </div>
+    </div>
+  </section>`;
+}
+
 function renderHome() {
   const stats = calculateStats(state.sessions, TASK_CARDS, METRICS);
   const annualEntry = annualEntryForDate();
@@ -506,59 +541,35 @@ function renderHome() {
     (session) => session.completionStatus === "completed" && dateKey(session.completedAt) === dateKey(new Date()),
   ).length;
   const activeCard = cardForSession();
+  const draw = currentTopicDraw();
+  const drawnCard = draw?.winnerId ? cardMap.get(draw.winnerId) : null;
   const statusTitle = state.activeSession
-    ? state.activeSession.stage === "complete"
-      ? "今天的训练已完成"
-      : "有一项训练等待继续"
-    : completedToday > 0
-      ? "今日闭环已完成"
-      : "今天，讲明白一件事";
-  const primaryAction = state.activeSession
-    ? `<button class="button button-primary button-large" type="button" data-action="resume-session">${icon(state.activeSession.stage === "complete" ? "chart" : "play")}<span>${state.activeSession.stage === "complete" ? "查看本次总结" : `继续${escapeHtml(stageLabel(state.activeSession.protocol, state.activeSession.stage))}`}</span></button>`
-    : `<button class="button button-primary button-large" type="button" data-action="start-home">${icon("play")}<span>${completedToday > 0 ? "再练一题" : "开始今日训练"}</span></button>`;
+    ? state.activeSession.stage === "complete" ? "今天的训练已完成" : "有一项训练等待继续"
+    : draw?.status === "spinning" ? "看看题目会停在哪里"
+      : draw?.status === "settled" ? "本轮题目已经抽出"
+        : completedToday > 0 ? "今日闭环已完成" : "今天，讲明白一件事";
+  let primaryAction;
+  if (state.activeSession) {
+    primaryAction = `<button class="button button-primary button-large" type="button" data-action="resume-session">${icon(state.activeSession.stage === "complete" ? "chart" : "play")}<span>${state.activeSession.stage === "complete" ? "查看本次总结" : `继续${escapeHtml(stageLabel(state.activeSession.protocol, state.activeSession.stage))}`}</span></button>`;
+  } else if (state.homeScene) {
+    primaryAction = `<button class="button button-primary button-large" type="button" data-action="start-home"${draw?.status === "spinning" ? " disabled" : ""}>${icon(draw?.status === "settled" ? "play" : "shuffle")}<span>${draw?.status === "settled" ? "开始这张训练" : draw?.status === "spinning" ? "正在抽题" : "开始抽题"}</span></button>`;
+  } else {
+    primaryAction = `<button class="button button-primary button-large" type="button" data-action="start-home">${icon("play")}<span>${completedToday > 0 ? "再练一题" : "开始今日训练"}</span></button>`;
+  }
 
   const content = `
-    <div class="page-heading">
-      <div><p class="eyebrow">今日训练</p><h1>${statusTitle}</h1><p>${state.activeSession ? escapeHtml(activeCard?.title ?? state.activeSession.title) : "从场景化任务卡出发，自行搜索、组织、表达、复盘并立即重讲。"}</p></div>
-      <div class="streak-box"><span>连续完成</span><strong>${stats.streak.current}</strong><small>天 · 最长 ${stats.streak.best} 天</small></div>
-    </div>
-
+    <div class="page-heading"><div><p class="eyebrow">今日训练</p><h1>${statusTitle}</h1><p>${state.activeSession ? escapeHtml(activeCard?.title ?? state.activeSession.title) : "从场景化任务卡出发，自行搜索、组织、表达、复盘并立即重讲。"}</p></div><div class="streak-box"><span>连续完成</span><strong>${stats.streak.current}</strong><small>天 · 最长 ${stats.streak.best} 天</small></div></div>
     <section class="today-workspace" aria-labelledby="today-title">
       <div class="today-copy">
-        <div class="status-line"><span class="status-badge ${state.activeSession ? "status-active" : completedToday ? "status-done" : "status-ready"}">${state.activeSession ? "进行中" : completedToday ? "已完成" : "待开始"}</span><span>${state.activeSession ? `${escapeHtml(activeCard?.sceneLabel ?? "训练")} · ${state.activeSession.mode === "quick" ? "快速模式" : "完整闭环"}` : state.homeScene ? `题库 ${TASK_CARDS.length} 张 · 指定场景自适应` : `年度第 ${annualEntry?.dayNumber ?? "—"} / 365 题 · 本地固定计划`}</span></div>
-        <h2 id="today-title">${state.activeSession ? escapeHtml(activeCard?.topicLabel ?? state.activeSession.topicLabel) : state.homeScene ? "按指定场景选择一张适合当前等级的题" : escapeHtml(annualEntry?.card.topicLabel ?? "系统规定路径，你完成思考")}</h2>
-        <p>${state.activeSession ? `进度已自动保存在当前设备。预计总时长 ${totalEstimatedMinutes(state.activeSession)} 分钟。` : state.homeScene ? "指定场景会继续使用自适应选题，并结合等级、近期覆盖与重复约束。" : `今日题来自 365 张固定题库；同一年、同一天在本设备上始终一致。${annualEntry ? ` 今日场景：${escapeHtml(annualEntry.card.sceneLabel)}。` : ""}`}</p>
+        <div class="status-line"><span class="status-badge ${state.activeSession ? "status-active" : draw?.status === "settled" ? "status-done" : "status-ready"}">${state.activeSession ? "进行中" : draw?.status === "settled" ? "已抽取" : "待开始"}</span><span>${state.activeSession ? `${escapeHtml(activeCard?.sceneLabel ?? "训练")} · ${state.activeSession.mode === "quick" ? "快速模式" : "完整闭环"}` : state.homeScene ? `${escapeHtml(SCENES[state.homeScene]?.label ?? "指定场景")} · 自适应抽题` : `年度第 ${annualEntry?.dayNumber ?? "—"} / 365 题 · 本地固定计划`}</span></div>
+        <h2 id="today-title">${state.activeSession ? escapeHtml(activeCard?.topicLabel ?? state.activeSession.topicLabel) : drawnCard ? escapeHtml(drawnCard.title) : state.homeScene ? "横向轮转，从这个场景抽出本轮题目" : escapeHtml(annualEntry?.card.topicLabel ?? "系统规定路径，你完成思考")}</h2>
+        <p>${state.activeSession ? `进度已自动保存在当前设备。预计总时长 ${totalEstimatedMinutes(state.activeSession)} 分钟。` : drawnCard ? `定格话题：${escapeHtml(drawnCard.topicLabel)}。结果来自难度、近期覆盖和重复约束，不是纯随机。` : state.homeScene ? "先选模式，再点击开始抽题；轨道会在同场景题目中轮转并定格。" : `今日题来自 365 张固定题库；同一年、同一天在本设备上始终一致。${annualEntry ? ` 今日场景：${escapeHtml(annualEntry.card.sceneLabel)}。` : ""}`}</p>
+        ${!state.activeSession && state.homeScene ? renderTopicDraw(draw) : ""}
       </div>
-      <div class="today-controls">
-        ${state.activeSession ? "" : renderModeSelector(state.homeMode)}
-        ${state.activeSession ? "" : renderSceneSelect(state.homeScene)}
-        ${primaryAction}
-        ${state.activeSession && state.activeSession.stage !== "complete" ? `<button class="button button-ghost" type="button" data-action="open-abandon">${icon("x")}结束并记录未完成</button>` : ""}
-      </div>
+      <div class="today-controls">${state.activeSession ? "" : renderModeSelector(state.homeMode)}${state.activeSession ? "" : renderSceneSelect(state.homeScene)}${primaryAction}${state.activeSession && state.activeSession.stage !== "complete" ? `<button class="button button-ghost" type="button" data-action="open-abandon">${icon("x")}结束并记录未完成</button>` : ""}</div>
     </section>
-
-    <section class="focus-band" aria-labelledby="focus-title">
-      <div class="focus-icon">${icon("target")}</div>
-      <div><p class="eyebrow">当前唯一训练重点</p><h2 id="focus-title">${escapeHtml(stats.focus.label)}</h2><p>${escapeHtml(stats.focus.reason)}</p></div>
-      <button class="button button-secondary" type="button" data-action="navigate" data-view="ability">查看依据${icon("chevronRight")}</button>
-    </section>
-
-    <div class="home-dashboard">
-      <section class="dashboard-section" aria-labelledby="coverage-title">
-        <div class="section-heading"><div><p class="eyebrow">滚动 7 天</p><h2 id="coverage-title">本周场景覆盖</h2></div><span class="metric-number">${Object.values(stats.sceneCounts7).filter(Boolean).length}<small>/ 10 类</small></span></div>
-        ${sceneCoverage(stats.sceneCounts7, 7, true)}
-      </section>
-      <section class="dashboard-section" aria-labelledby="loop-title">
-        <div class="section-heading"><div><p class="eyebrow">滚动 28 天</p><h2 id="loop-title">完整训练闭环</h2></div><span class="metric-number">${stats.completeLoops28}</span></div>
-        <div class="metric-grid">
-          <div><span>重讲改善率</span><strong>${stats.improvementRate}%</strong></div>
-          <div><span>结构多样性</span><strong>${stats.structureDiversity30}</strong></div>
-          <div><span>来源达成率</span><strong>${stats.sourceComplianceRate}%</strong></div>
-          <div><span>本周完成天数</span><strong>${stats.completionDays7}</strong></div>
-        </div>
-        <button class="text-button" type="button" data-action="navigate" data-view="history">查看全部训练记录${icon("arrowRight")}</button>
-      </section>
-    </div>
+    <section class="focus-band" aria-labelledby="focus-title"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">当前唯一训练重点</p><h2 id="focus-title">${escapeHtml(stats.focus.label)}</h2><p>${escapeHtml(stats.focus.reason)}</p></div><button class="button button-secondary" type="button" data-action="navigate" data-view="ability">查看依据${icon("chevronRight")}</button></section>
+    <div class="home-dashboard"><section class="dashboard-section" aria-labelledby="coverage-title"><div class="section-heading"><div><p class="eyebrow">滚动 7 天</p><h2 id="coverage-title">本周场景覆盖</h2></div><span class="metric-number">${Object.values(stats.sceneCounts7).filter(Boolean).length}<small>/ 10 类</small></span></div>${sceneCoverage(stats.sceneCounts7, 7, true)}</section><section class="dashboard-section" aria-labelledby="loop-title"><div class="section-heading"><div><p class="eyebrow">滚动 28 天</p><h2 id="loop-title">完整训练闭环</h2></div><span class="metric-number">${stats.completeLoops28}</span></div><div class="metric-grid"><div><span>重讲改善率</span><strong>${stats.improvementRate}%</strong></div><div><span>结构多样性</span><strong>${stats.structureDiversity30}</strong></div><div><span>来源达成率</span><strong>${stats.sourceComplianceRate}%</strong></div><div><span>本周完成天数</span><strong>${stats.completionDays7}</strong></div></div><button class="text-button" type="button" data-action="navigate" data-view="history">查看全部训练记录${icon("arrowRight")}</button></section></div>
   `;
   return renderShell(content, { title: "今日训练" });
 }
@@ -1337,6 +1348,60 @@ async function startNewSession(card, options = {}) {
   navigate("train");
 }
 
+function prefersReducedMotion() {
+  return state.settings.reducedMotion || Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+}
+
+async function runTopicDraw({ requestedScene = state.homeScene, mode = state.homeMode } = {}) {
+  const result = selectTask({
+    cards: TASK_CARDS,
+    history: state.sessions,
+    settings: state.settings,
+    requestedScene,
+  });
+  const sequence = createDrawSequence({
+    cards: TASK_CARDS,
+    winner: result.card,
+    requestedScene,
+  });
+  const reducedMotion = prefersReducedMotion();
+  const revision = ++topicDrawRevision;
+  state.topicDraw = {
+    scene: requestedScene,
+    mode,
+    status: reducedMotion ? "settled" : "spinning",
+    winnerId: result.card.id,
+    winnerIndex: sequence.winnerIndex,
+    cardIds: sequence.cards.map((card) => card.id),
+    selectionReason: result.reason,
+  };
+  state.pendingAnnouncement = reducedMotion ? `已抽中${result.card.title}` : "题目开始轮转";
+  render();
+  if (reducedMotion) {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 2_400));
+  if (revision !== topicDrawRevision || state.homeScene !== requestedScene || state.homeMode !== mode) {
+    return;
+  }
+  state.topicDraw = { ...state.topicDraw, status: "settled" };
+  state.pendingAnnouncement = `已抽中${result.card.title}`;
+  render();
+}
+
+async function startDrawnTopic() {
+  const draw = currentTopicDraw();
+  const card = draw?.status === "settled" ? cardMap.get(draw.winnerId) : null;
+  if (!card) {
+    await runTopicDraw();
+    return;
+  }
+  await startNewSession(card, {
+    mode: state.homeMode,
+    selectionReason: `${draw.selectionReason} · 场景轮盘定格`,
+  });
+}
+
 async function selectAndStart({ requestedScene = state.homeScene, mode = state.homeMode } = {}) {
   let card;
   let selectionReason;
@@ -1783,6 +1848,7 @@ async function updateSetting(id, value) {
   await saveSettings(settings);
   state.settings = settings;
   if (id === "defaultMode") {
+    resetTopicDraw();
     state.homeMode = value;
   }
   applySettings();
@@ -1859,6 +1925,7 @@ root.addEventListener("click", async (event) => {
   if (action === "navigate") {
     navigate(control.dataset.view);
   } else if (action === "home-mode") {
+    if (state.homeMode !== control.dataset.value) resetTopicDraw();
     state.homeMode = control.dataset.value;
     render();
   } else if (action === "setting-mode" || action === "onboarding-mode") {
@@ -1869,7 +1936,13 @@ root.addEventListener("click", async (event) => {
     }
     render();
   } else if (action === "start-home") {
-    await selectAndStart();
+    if (state.homeScene && currentTopicDraw()?.status !== "settled") {
+      void runTopicDraw().catch((error) => showToast(error?.message || "抽题失败，请重试。", "danger"));
+    } else if (state.homeScene) {
+      await startDrawnTopic();
+    } else {
+      await selectAndStart();
+    }
   } else if (action === "resume-session") {
     navigate("train");
   } else if (action === "start-training") {
@@ -2065,7 +2138,9 @@ root.addEventListener("change", async (event) => {
   }
   try {
   if (target.name === "homeScene") {
+    resetTopicDraw();
     state.homeScene = target.value;
+    render();
   } else if (target.matches("[data-research-prompt]")) {
     const card = cardForSession();
     const prompt = card.researchPrompts[Number(target.dataset.researchPrompt)];

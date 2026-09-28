@@ -207,6 +207,36 @@ export function selectTask({
   };
 }
 
+export function createDrawSequence({ cards, winner, requestedScene = winner?.scene, length = 12, random = Math.random } = {}) {
+  if (!winner?.id || !Number.isInteger(length) || length < 3) {
+    throw new Error("抽题轮播需要获选题卡和至少三个位置");
+  }
+  const pool = cards.filter(
+    (card) =>
+      card.status === "active" &&
+      card.scene === requestedScene &&
+      card.id !== winner.id,
+  );
+  if (pool.length === 0) {
+    throw new Error("当前场景没有足够的轮播候选题卡");
+  }
+  const winnerIndex = length - 2;
+  const sequence = [];
+  let previousId = null;
+  for (let index = 0; index < winnerIndex; index += 1) {
+    const choices = pool.filter((card) => card.id !== previousId);
+    const source = choices.length ? choices : pool;
+    const picked = source[Math.min(source.length - 1, Math.floor(random() * source.length))];
+    sequence.push(picked);
+    previousId = picked.id;
+  }
+  sequence.push(winner);
+  const tailPool = pool.filter((card) => card.id !== previousId);
+  const tailSource = tailPool.length ? tailPool : pool;
+  sequence.push(tailSource[Math.min(tailSource.length - 1, Math.floor(random() * tailSource.length))]);
+  return { cards: sequence, winnerIndex };
+}
+
 export function createSeededRandom(seed = 1) {
   let value = seed >>> 0;
   return () => {

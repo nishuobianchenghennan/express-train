@@ -16,6 +16,7 @@ import {
   annualPlanAlternative,
   annualPlanEntryForDate,
   createAnnualPlan,
+  createDrawSequence,
   createSeededRandom,
   selectTask,
   simulateSelections,
@@ -129,6 +130,23 @@ test("requested scene and difficulty remain respected", () => {
   assert.equal(result.card.scene, "interview_answer");
   assert.ok(result.card.difficulty >= 3);
   assert.match(result.reason, /指定场景/);
+});
+
+test("topic draw sequence stays in the requested scene and lands on the selected card", () => {
+  const winner = TASK_CARDS.find((card) => card.scene === "interview_answer");
+  const draw = createDrawSequence({
+    cards: TASK_CARDS,
+    winner,
+    requestedScene: "interview_answer",
+    length: 12,
+    random: createSeededRandom(17),
+  });
+  assert.equal(draw.cards.length, 12);
+  assert.equal(draw.winnerIndex, 10);
+  assert.equal(draw.cards[draw.winnerIndex].id, winner.id);
+  assert.equal(draw.cards.filter((card) => card.id === winner.id).length, 1);
+  assert.equal(draw.cards.every((card) => card.scene === "interview_answer"), true);
+  assert.equal(draw.cards.slice(1, draw.winnerIndex).some((card, index) => card.id === draw.cards[index].id), false);
 });
 
 test("sessions preserve repeatable sensitive-task skips without consuming the normal swap", () => {
