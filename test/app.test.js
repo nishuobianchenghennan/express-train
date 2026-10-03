@@ -52,7 +52,7 @@ test("service worker precaches one complete version of the module graph", async 
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-cache");
     assert.match(body, /CACHE_PREFIX.*speak-clearly-/);
-    assert.match(body, /2026\.10\.03-3/);
+    assert.match(body, /2026\.10\.04-2/);
     assert.match(body, /key\.startsWith\(CACHE_PREFIX\).*key !== CACHE_NAME/);
     assert.match(body, /\/js\/data\/card-additions\.js/);
     assert.match(body, /fetch\(request, \{ cache: "no-store" \}\)/);
@@ -80,7 +80,7 @@ test("home draws one adaptive arena card in five seconds before starting a drill
   const source = await readFile(new URL("../public/js/app.js", import.meta.url), "utf8");
   assert.match(source, /const TOPIC_DRAW_DURATION_MS = 5_000/);
   assert.match(source, /function idleTopicCards\(family\)/);
-  assert.match(source, /const selection = selectArenaCard\(\{ drills: state\.drills, family: requestedScene \|\| "" \}\)/);
+  assert.match(source, /const selection = selectArenaCard\(\{ drills: state\.drills, family: requestedScene \|\| "", learned: learnedScenarios\(state\.lessonRuns\) \}\)/);
   assert.match(source, /winnerId: selection\.card\.id/);
   assert.match(source, /status === "settled" && index === winnerIndex/);
   assert.match(source, /revisitOf: draw\.revisitOf/);

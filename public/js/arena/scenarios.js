@@ -289,7 +289,7 @@ export const SCENARIOS = Object.freeze([
       counterpart: "面试官",
       goal: "先给判断，再讲依据和不确定性，最后落到你入职后会怎么做。",
     }),
-    cognition: (x) => [`“${x.trends[0]}”的来龙去脉是什么？最近有哪些可靠报道或数据？`, `这个变化对${x.org}这类公司，是机会更多还是压力更多？`],
+    cognition: (x) => [`「${x.trends[0]}」的来龙去脉是什么？最近有哪些可靠报道或数据？`, `这个变化对${x.org}这类公司，是机会更多还是压力更多？`],
   }),
   scenario("self_intro", {
     family: "career",
@@ -323,7 +323,7 @@ export const SCENARIOS = Object.freeze([
       counterpart: "沙龙现场的听众",
       goal: "先给一个判断，用一个一线观察支撑，在一分钟内收住。",
     }),
-    cognition: (x) => [`“${x.trends[1]}”目前有哪些被广泛讨论的事实和争议？`, "你作为一线从业者，能给出哪个别人不知道的观察？"],
+    cognition: (x) => [`「${x.trends[1]}」目前有哪些被广泛讨论的事实和争议？`, "你作为一线从业者，能给出哪个别人不知道的观察？"],
   }),
   scenario("toast", {
     family: "impromptu",
@@ -388,11 +388,11 @@ export const SCENARIOS = Object.freeze([
     followups: ["own_view", "worst_case", "so_what"],
     build: (x) => ({
       title: `判断：${x.trends[1]}`,
-      situation: `${x.boss}请你在下周的经营会上，用一分半钟讲讲你对“${x.trends[1]}”的判断，以及${x.org}应该怎么应对。`,
+      situation: `${x.boss}请你在下周的经营会上，用一分半钟讲讲你对「${x.trends[1]}」的判断，以及${x.org}应该怎么应对。`,
       counterpart: x.boss,
       goal: "给出明确判断，讲清对客户和公司的不同影响，提出一个可以先试的动作。",
     }),
-    cognition: (x) => [`“${x.trends[1]}”背后的驱动因素是什么？有哪些可靠来源可以核实？`, `它对${x.client}和对${x.org}的影响有什么不同？`],
+    cognition: (x) => [`「${x.trends[1]}」背后的驱动因素是什么？有哪些可靠来源可以核实？`, `它对${x.client}和对${x.org}的影响有什么不同？`],
   }),
 ]);
 

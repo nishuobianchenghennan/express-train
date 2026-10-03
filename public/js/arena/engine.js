@@ -23,6 +23,7 @@ const REVISIT_MIN_DAYS = 3;
 const REVISIT_MAX_DAYS = 30;
 const WEAKNESS_MIN_ATTEMPTS = 3;
 const WEAKNESS_WINDOW = 20;
+const LEARNED_PREFERENCE = 0.7;
 
 function randomId() {
   return globalThis.crypto?.randomUUID?.() ?? `drill-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -241,11 +242,11 @@ export function targetDifficulty(drills) {
 /**
  * 自适应选卡。
  *
- * 优先级：到期复练（间隔重复）> 弱项场景 > 行业覆盖最少 > 场景家族交错（避免连续同类）。
+ * 优先级：到期复练（间隔重复）> 已学结构的场景 > 弱项场景 > 行业覆盖最少 > 场景家族交错（避免连续同类）。
  *
  * @returns {{ card: object, reason: string, revisitOf: string|null, avoidPressures: string[] }}
  */
-export function selectArenaCard({ cards = ARENA_CARDS, drills = [], family = "", now = Date.now(), random = Math.random } = {}) {
+export function selectArenaCard({ cards = ARENA_CARDS, drills = [], family = "", learned = new Set(), now = Date.now(), random = Math.random } = {}) {
   const pool = cards.filter((card) => card.status === "active" && (!family || card.family === family));
   if (!pool.length) throw new Error("当前范围没有可用的实战卡");
   const done = completedDrills(drills);
@@ -261,6 +262,14 @@ export function selectArenaCard({ cards = ARENA_CARDS, drills = [], family = "",
   let candidates = pool.filter((card) => !recentIds.has(card.id));
   if (!candidates.length) candidates = pool;
   const reasons = [];
+  // 学过的场景以 70% 概率优先出现，把学习模式里的结构用到新行业上
+  if (learned.size) {
+    const applied = candidates.filter((card) => learned.has(card.scenarioId));
+    if (applied.length && random() < LEARNED_PREFERENCE) {
+      candidates = applied;
+      reasons.push("应用已学结构");
+    }
+  }
   const weak = weakestCheck(drills);
   if (weak) {
     const targeted = candidates.filter((card) => card.checks.includes(weak));

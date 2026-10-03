@@ -25,6 +25,8 @@ import { calculateStats, filterHistory } from "./core/stats.js";
 import { ARENA_CARD_MAP, ARENA_CARDS, CHECKS, FAMILIES } from "./arena/scenarios.js";
 import { arenaStats, selectArenaCard } from "./arena/engine.js";
 import { applyRateBars, createArenaController, estimateDrillMinutes, renderArenaAbility, renderDrillHistory } from "./arena/ui.js";
+import { learnedScenarios } from "./arena/lesson-engine.js";
+import { createLessonController, renderLearnHome } from "./arena/lesson-ui.js";
 import {
   archiveSessionWithoutRecordings,
   clearActiveSession,
@@ -33,8 +35,10 @@ import {
   exportLocalData,
   importLocalData,
   loadActiveDrill,
+  loadActiveLesson,
   loadActiveSession,
   loadDrills,
+  loadLessonRuns,
   loadFavorites,
   loadRecording,
   loadSessions,
@@ -44,6 +48,7 @@ import {
   saveCompletedSession,
   saveDrillProgress,
   saveFavorites,
+  saveLessonProgress,
   saveRecording,
   saveSettings,
   storageSummary,
@@ -51,7 +56,7 @@ import {
 
 const root = document.querySelector("#app");
 const cardMap = new Map(TASK_CARDS.map((card) => [card.id, card]));
-const validViews = new Set(["home", "library", "history", "ability", "settings", "train", "drill"]);
+const validViews = new Set(["home", "library", "history", "ability", "settings", "train", "drill", "lesson"]);
 const validCompletionStatuses = new Set(["completed", "skipped", "abandoned"]);
 const generalMetricIds = Object.entries(METRICS)
   .filter(([, metric]) => metric.general)
@@ -79,6 +84,13 @@ const exclusiveActions = new Set([
   "drill-take-finish",
   "drill-close",
   "drill-next",
+  "lesson-start",
+  "lesson-advance",
+  "lesson-take-finish",
+  "lesson-close",
+  "lesson-next",
+  "lesson-practice",
+  "home-track",
   "start-training",
   "skip-sensitive-task",
   "confirm-swap",
@@ -107,6 +119,8 @@ const state = {
   topicDraw: null,
   activeDrill: null,
   drills: [],
+  activeLesson: null,
+  lessonRuns: [],
   libraryFilters: { query: "", scene: "", domain: "", difficulty: "", favorites: "" },
   historyFilters: {
     query: "",
@@ -157,6 +171,19 @@ const arena = createArenaController({
   loadRecording,
   saveDrillProgress,
   onNextDrill: () => void runTopicDraw().catch((error) => showToast(error?.message || "抽题失败，请重试。", "danger")),
+});
+const lessons = createLessonController({
+  root,
+  state,
+  escapeHtml,
+  icon,
+  render: () => render(),
+  navigate: (view) => navigate(view),
+  showToast: (message, tone) => showToast(message, tone),
+  saveRecording,
+  loadRecording,
+  saveLessonProgress,
+  onPracticeScenario: (scenarioId) => void practiceScenario(scenarioId).catch((error) => showToast(error?.message || "无法开始实践，请重试。", "danger")),
 });
 
 function escapeHtml(value = "") {
@@ -425,7 +452,7 @@ function showToast(message, tone = "default") {
 }
 
 function navigate(view) {
-  if (arena.isBusy()) {
+  if (arena.isBusy() || lessons.isBusy()) {
     showToast("正在表达中，请先点“讲完了”。", "danger");
     return;
   }
@@ -444,21 +471,21 @@ function navigate(view) {
 }
 
 function navItem(view, label, iconName) {
-  const active = state.view === view || (view === "home" && ["train", "drill"].includes(state.view));
+  const active = state.view === view || (view === "home" && ["train", "drill", "lesson"].includes(state.view));
   return `<button class="nav-item${active ? " is-active" : ""}" type="button" data-action="navigate" data-view="${view}" aria-current="${active ? "page" : "false"}">${icon(iconName)}<span>${label}</span></button>`;
 }
 
 function renderShell(content, options = {}) {
-  const training = state.view === "train" || state.view === "drill";
+  const training = ["train", "drill", "lesson"].includes(state.view);
   return `
     <div class="app-shell${training ? " is-training" : ""}">
       <aside class="sidebar" aria-label="主要导航">
         <button class="brand" type="button" data-action="navigate" data-view="home" aria-label="讲明白首页">
           <img src="/icons/icon.svg" alt="" width="38" height="38">
-          <span><strong>讲明白</strong><small>实战表达训练</small></span>
+          <span><strong>讲明白</strong><small>表达结构与实战训练</small></span>
         </button>
         <nav class="sidebar-nav">
-          ${navItem("home", "实战训练", "home")}
+          ${navItem("home", "今日训练", "home")}
           ${navItem("library", "主题题库", "library")}
           ${navItem("history", "训练历史", "history")}
           ${navItem("ability", "能力档案", "chart")}
@@ -478,7 +505,7 @@ function renderShell(content, options = {}) {
         </header>
         <main id="main-content" class="main-content${training ? " training-content" : ""}" tabindex="-1">${content}</main>
       </div>
-      ${training ? "" : `<nav class="bottom-nav" aria-label="移动端导航">${navItem("home", "实战", "home")}${navItem("library", "题库", "library")}${navItem("history", "历史", "history")}${navItem("ability", "能力", "chart")}${navItem("settings", "设置", "settings")}</nav>`}
+      ${training ? "" : `<nav class="bottom-nav" aria-label="移动端导航">${navItem("home", "训练", "home")}${navItem("library", "题库", "library")}${navItem("history", "历史", "history")}${navItem("ability", "能力", "chart")}${navItem("settings", "设置", "settings")}</nav>`}
     </div>
     ${renderModal()}
     ${!state.settings.onboardingComplete && !state.modal ? renderOnboarding() : ""}
@@ -645,10 +672,29 @@ function renderHomeStartAction(draw, card) {
   return `<button class="button button-primary button-large" type="button" data-action="start-home">${icon(draw?.status === "settled" ? "play" : "shuffle")}<span>${label}</span></button>`;
 }
 
+/** 首页顶部的模式切换：学习模式（模仿结构）与实践模式（实战演练）。 */
+function renderTrackSwitch(track) {
+  const option = (value, label, hint) => `<button type="button" role="radio" aria-checked="${track === value}" tabindex="${track === value ? "0" : "-1"}" class="${track === value ? "is-active" : ""}" data-action="home-track" data-value="${value}"><span>${label}</span><small>${hint}</small></button>`;
+  return `<div class="segmented track-switch" role="radiogroup" aria-label="训练模式">${option("learn", "学习模式", "看示范、拆结构、模仿复述、迁移")}${option("practice", "实践模式", "直接上场：限时开口、被打断、自查重讲")}</div>`;
+}
+
+function renderLearnHomePage() {
+  const learned = learnedScenarios(state.lessonRuns).size;
+  const content = `
+    <div class="home-intent-bar"><div><p class="eyebrow">今日训练</p><h1>${learned ? `已掌握 ${learned} 种表达结构` : "先学会一种表达结构"}</h1><p>表达新手先模仿：看一个好回答为什么好，收起示范复述它，再把同一个结构用到另一个行业。学完的结构会在实践模式里优先出现。</p></div><div class="intent-streak"><span>已学结构</span><strong>${learned}</strong><small>/ 19</small></div></div>
+    ${renderTrackSwitch("learn")}
+    ${renderLearnHome({ runs: state.lessonRuns, activeRun: state.activeLesson }, { escapeHtml, icon })}
+  `;
+  return renderShell(content, { title: "学习模式" });
+}
+
 /**
- * 首页：实战回合入口。旧版训练进行中时提供继续入口，但不再作为默认流程。
+ * 首页：按模式显示学习路径或实战回合入口。
  */
 function renderHome() {
+  if (state.settings.homeTrack !== "practice") {
+    return renderLearnHomePage();
+  }
   const stats = arenaStats(state.drills);
   const drill = state.activeDrill?.status === "in_progress" ? state.activeDrill : null;
   const drillCard = drill ? ARENA_CARD_MAP.get(drill.cardId) : null;
@@ -664,7 +710,8 @@ function renderHome() {
     : renderHomeStartAction(draw, drawnCard);
   const legacyActive = state.activeSession && state.activeSession.stage !== "complete";
   const content = `
-    <div class="home-intent-bar"><div><p class="eyebrow">实战训练 · 先开口，再补课，带着追问重讲</p><h1>${statusTitle}</h1><p>${drill ? escapeHtml(drillCard?.title ?? drill.title) : "每个回合都是一个真实工作或社交场景：限时开口、中途被打断、回听逐项检查、补上行业认知，再接受追问重讲一次。"}</p></div><div class="intent-streak"><span>连续训练</span><strong>${stats.streak}</strong><small>天</small></div></div>
+    <div class="home-intent-bar"><div><p class="eyebrow">实践模式 · 先开口，再补课，带着追问重讲</p><h1>${statusTitle}</h1><p>${drill ? escapeHtml(drillCard?.title ?? drill.title) : "每个回合都是一个真实工作或社交场景：限时开口、中途被打断、回听逐项检查、补上行业认知，再接受追问重讲一次。"}</p></div><div class="intent-streak"><span>连续训练</span><strong>${stats.streak}</strong><small>天</small></div></div>
+    ${renderTrackSwitch("practice")}
     <section class="practice-entry${drill ? " has-active" : ""}" aria-labelledby="today-title">
       <div class="entry-main">
         <div class="entry-kicker"><span class="status-badge ${drill ? "status-active" : draw?.status === "settled" ? "status-done" : "status-ready"}">${drill ? "进行中" : draw?.status === "settled" ? "已选出场景" : "准备开始"}</span><span>${state.homeMode === "quick" ? "闪电回合" : "完整回合"}${stats.revisitsDue ? ` · ${stats.revisitsDue} 个回合到期复练` : ""}</span></div>
@@ -678,7 +725,7 @@ function renderHome() {
     <section class="focus-band focus-band-quiet" aria-labelledby="focus-title"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">当前弱项（按首轮冷启动统计）</p><h2 id="focus-title">${weak ? escapeHtml(weak.label) : "还在观察"}</h2><p>${weak ? `${escapeHtml(weak.question)}。首轮做到率 ${stats.rates[stats.weakest].firstRate}%，自适应抽题会优先安排考核这一项的场景。` : "完成 3 个回合后，系统会根据你首轮没做到的行为安排场景。"}</p></div><button class="button button-secondary" type="button" data-action="navigate" data-view="ability">查看依据${icon("chevronRight")}</button></section>
     <section class="progress-strip" aria-label="训练概览"><div><span>今日回合</span><strong>${stats.today}</strong></div><div><span>近 7 天</span><strong>${stats.last7}</strong></div><div><span>行业覆盖</span><strong>${stats.industriesCovered}<small>/ ${stats.industriesTotal}</small></strong></div><div><span>接住打断</span><strong>${stats.pressureRate == null ? "—" : `${stats.pressureRate}%`}</strong></div><button class="text-button" type="button" data-action="navigate" data-view="history">查看记录${icon("arrowRight")}</button></section>
   `;
-  return renderShell(content, { title: "实战训练" });
+  return renderShell(content, { title: "实践模式" });
 }
 
 function renderTaskPreview(session, card) {
@@ -1298,7 +1345,7 @@ function renderHistoryModal(session) {
 }
 
 function renderOnboarding() {
-  return `<div class="modal-backdrop onboarding-backdrop"><section class="modal onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" data-modal-panel><img src="/icons/icon.svg" alt="" width="58" height="58"><p class="eyebrow">首次使用</p><h2 id="onboarding-title">先开口，再补课，带着追问重讲</h2><div class="principle-list"><div><span>01</span><p><strong>真实场景，冷启动开口</strong>18 个行业的汇报、谈判、投诉、面试、被点名，准备时间只有几秒到半分钟。</p></div><div><span>02</span><p><strong>压力和追问是训练的一部分</strong>讲到一半会被打断，重讲前会被追问；在压力下练，才能在压力下用。</p></div><div><span>03</span><p><strong>回听时只判断“做到 / 没做到”</strong>不打笼统分数，每回合只改一项。数据只留在当前设备。</p></div></div><div class="onboarding-choice"><span>首页默认训练模式</span>${renderModeSelector(state.settings.defaultMode, "onboarding-mode")}</div><button class="button button-primary button-large" type="button" data-action="complete-onboarding">进入实战训练${icon("arrowRight")}</button></section></div>`;
+  return `<div class="modal-backdrop onboarding-backdrop"><section class="modal onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" data-modal-panel><img src="/icons/icon.svg" alt="" width="58" height="58"><p class="eyebrow">首次使用</p><h2 id="onboarding-title">先模仿结构，再上场实战</h2><div class="principle-list"><div><span>01</span><p><strong>学习模式：先学会说</strong>每一课拆解一个场景的示范回答，讲清每一句为什么这样说；然后收起示范复述、自查、再讲，最后换一个行业迁移。</p></div><div><span>02</span><p><strong>实践模式：再上场</strong>18 个行业的真实场景，限时开口，讲到一半会被打断，重讲前会被追问。</p></div><div><span>03</span><p><strong>只判断“做到 / 没做到”</strong>不打笼统分数，拿不准就算没做到。数据只留在当前设备。</p></div></div><div class="onboarding-choice"><span>首页默认训练模式</span>${renderModeSelector(state.settings.defaultMode, "onboarding-mode")}</div><button class="button button-primary button-large" type="button" data-action="complete-onboarding">从学习模式开始${icon("arrowRight")}</button></section></div>`;
 }
 
 function render() {
@@ -1314,6 +1361,8 @@ function render() {
     applyTopicDrawMotion();
   } else if (view === "drill") {
     root.innerHTML = renderShell(arena.renderWorkspace(), { title: "实战回合" });
+  } else if (view === "lesson") {
+    root.innerHTML = renderShell(lessons.renderWorkspace(), { title: "学习模式" });
   } else if (view === "train") {
     root.innerHTML = renderTraining();
   } else if (view === "library") {
@@ -1328,6 +1377,7 @@ function render() {
   document.title = `${root.querySelector(".topbar-title")?.textContent ?? "讲明白"} · 讲明白`;
   hydrateAudioPlayers(state.renderVersion);
   arena.afterRender();
+  lessons.afterRender();
   applyRateBars(root);
   updateClock();
   const modal = root.querySelector("[data-modal-panel]");
@@ -1470,7 +1520,7 @@ function prefersReducedMotion() {
 }
 
 async function runTopicDraw({ requestedScene = state.homeScene, mode = state.homeMode } = {}) {
-  const selection = selectArenaCard({ drills: state.drills, family: requestedScene || "" });
+  const selection = selectArenaCard({ drills: state.drills, family: requestedScene || "", learned: learnedScenarios(state.lessonRuns) });
   const sequence = createDrawSequence({
     cards: ARENA_CARDS,
     winner: selection.card,
@@ -1498,6 +1548,16 @@ async function runTopicDraw({ requestedScene = state.homeScene, mode = state.hom
   state.topicDraw = { ...state.topicDraw, status: "settled" };
   state.pendingAnnouncement = `已抽中${selection.card.title}`;
   render();
+}
+
+/** 学完一课后直接实践同一场景：换一个示范和迁移都没用过的行业。 */
+async function practiceScenario(scenarioId) {
+  const lastRun = [...state.lessonRuns].reverse().find((run) => run.scenarioId === scenarioId);
+  const usedCards = new Set([lastRun?.exampleCardId, lastRun?.transferCardId]);
+  const cards = ARENA_CARDS.filter((card) => card.scenarioId === scenarioId && !usedCards.has(card.id));
+  const selection = selectArenaCard({ cards, drills: state.drills });
+  await updateSetting("homeTrack", "practice");
+  await arena.startDrill(selection.card, { mode: state.homeMode, selectionReason: "学完立即实践 · 换一个行业、没有提示、会被打断" });
 }
 
 async function startDrawnTopic() {
@@ -1934,7 +1994,7 @@ async function importData(file) {
     const data = JSON.parse(await file.text());
     await flushScheduledActiveSave();
     await importLocalData(data);
-    [state.settings, state.sessions, state.activeSession, state.favorites, state.storage, state.drills, state.activeDrill] = await Promise.all([
+    [state.settings, state.sessions, state.activeSession, state.favorites, state.storage, state.drills, state.activeDrill, state.lessonRuns, state.activeLesson] = await Promise.all([
       loadSettings(),
       loadSessions(),
       loadActiveSession(),
@@ -1942,6 +2002,8 @@ async function importData(file) {
       storageSummary(),
       loadDrills(),
       loadActiveDrill(),
+      loadLessonRuns(),
+      loadActiveLesson(),
     ]);
     state.homeMode = state.settings.defaultMode;
     applySettings();
@@ -1982,6 +2044,12 @@ root.addEventListener("click", async (event) => {
   try {
   if (action.startsWith("drill-")) {
     await arena.handleAction(action, control);
+  } else if (action.startsWith("lesson-")) {
+    await lessons.handleAction(action, control);
+  } else if (action === "home-track") {
+    await updateSetting("homeTrack", control.dataset.value);
+    resetTopicDraw();
+    render();
   } else if (action === "resume-drill") {
     navigate("drill");
   } else if (action === "navigate") {
@@ -2149,7 +2217,7 @@ function updateOrganizeLiveFeedback() {
 
 root.addEventListener("input", (event) => {
   const target = event.target;
-  if (arena.handleInput(target)) {
+  if (arena.handleInput(target) || lessons.handleInput(target)) {
     return;
   }
   if (target.matches("[data-source-index]")) {
@@ -2326,7 +2394,7 @@ window.addEventListener("beforeunload", (event) => {
   if (hadPendingSave) {
     void flushScheduledActiveSave().catch(() => {});
   }
-  if (recordingBusy() || arena.isBusy() || hadPendingSave || saveInFlight) {
+  if (recordingBusy() || arena.isBusy() || lessons.isBusy() || hadPendingSave || saveInFlight) {
     event.preventDefault();
     event.returnValue = "";
   }
@@ -2334,7 +2402,7 @@ window.addEventListener("beforeunload", (event) => {
 
 async function initialize() {
   try {
-    [state.settings, state.sessions, state.activeSession, state.favorites, state.storage, state.drills, state.activeDrill] = await Promise.all([
+    [state.settings, state.sessions, state.activeSession, state.favorites, state.storage, state.drills, state.activeDrill, state.lessonRuns, state.activeLesson] = await Promise.all([
       loadSettings(),
       loadSessions(),
       loadActiveSession(),
@@ -2342,6 +2410,8 @@ async function initialize() {
       storageSummary(),
       loadDrills(),
       loadActiveDrill(),
+      loadLessonRuns(),
+      loadActiveLesson(),
     ]);
     state.sessions.sort((left, right) => sessionTimestamp(left) - sessionTimestamp(right));
     state.homeMode = state.settings.defaultMode;

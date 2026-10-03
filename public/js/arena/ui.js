@@ -20,6 +20,8 @@ import {
   takeSlot,
   validatePhase,
 } from "./engine.js";
+import { LESSON_MAP } from "./lessons.js";
+import { createTakeRunner } from "./recorder.js";
 
 const TICK_MS = 200;
 const STEP_GROUPS = [
@@ -52,7 +54,11 @@ export function estimateDrillMinutes(card, mode) {
  */
 export function createArenaController(ctx) {
   const { state, escapeHtml, icon } = ctx;
-  let runtime = null;
+  const takes = createTakeRunner({
+    showToast: (message, tone) => ctx.showToast(message, tone),
+    onChange: () => ctx.render(),
+    saveRecording: (id, blob) => ctx.saveRecording(id, blob),
+  });
   let ticker = null;
   let saveTail = Promise.resolve();
   let confirmAbandon = false;
@@ -75,7 +81,7 @@ export function createArenaController(ctx) {
   }
 
   function isBusy() {
-    return Boolean(runtime);
+    return takes.isBusy();
   }
 
   async function startDrill(card, options = {}) {
@@ -116,105 +122,28 @@ export function createArenaController(ctx) {
     }
   }
 
-  function stopStream(stream) {
-    stream?.getTracks().forEach((track) => track.stop());
-  }
-
-  /** 申请麦克风并启动录音器；失败时返回 null，由调用方退化为只计时。 */
-  async function openRecorder(current) {
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-      ctx.showToast("当前浏览器不支持录音，已改为只计时。回听检查只能凭记忆，准确度会下降。", "danger");
-      return null;
-    }
-    let stream = null;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (runtime !== current) {
-        // 等待授权期间用户已改为只计时或离开了本阶段
-        stopStream(stream);
-        return null;
-      }
-      const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      recorder.addEventListener("dataavailable", (event) => {
-        if (event.data.size > 0) current.chunks.push(event.data);
-      });
-      recorder.start(250);
-      return { stream, recorder };
-    } catch (error) {
-      stopStream(stream);
-      if (runtime === current) {
-        ctx.showToast(error?.name === "NotAllowedError" ? "没有麦克风权限，已改为只计时。" : "无法启动录音，已改为只计时。", "danger");
-      }
-      return null;
-    }
-  }
-
-  /**
-   * 开始一次表达：优先录音，没有麦克风时退化为只计时。
-   * 等待麦克风授权期间处于 requesting 状态，计时从真正开始录音时起算。
-   */
+  /** 开始一次表达：优先录音，没有麦克风时退化为只计时。 */
   async function startTake({ record }) {
     const drill = state.activeDrill;
     const slot = takeSlot(drill?.phase);
     if (!drill || !slot) return;
-    if (runtime?.status === "requesting" && !record) {
-      // 授权弹窗迟迟未处理时，允许直接改为只计时
-      runtime = null;
-    }
-    if (runtime) return;
-    const current = { slot, drillId: drill.drillId, status: "requesting", startedAt: null, recorder: null, stream: null, chunks: [], interruptShown: false, overtimeShown: false };
-    runtime = current;
-    if (record) {
-      ctx.render();
-      const opened = await openRecorder(current);
-      if (runtime !== current) return;
-      if (opened) Object.assign(current, opened);
-    }
-    current.status = "running";
-    current.startedAt = Date.now();
-    await persist({ ...state.activeDrill, phaseStartedAt: current.startedAt });
+    const started = await takes.start({ record, id: `${drill.drillId}-${slot}` });
+    if (!started || state.activeDrill?.drillId !== drill.drillId) return;
+    await persist({ ...state.activeDrill, phaseStartedAt: takes.current.startedAt });
     ctx.render();
   }
 
   async function finishTake() {
-    const current = runtime;
-    if (!current || current.status !== "running" || current.finishing) return;
-    current.finishing = true;
-    const durationSeconds = Math.round((Date.now() - current.startedAt) / 1000);
-    let recordingId = null;
-    if (current.recorder) {
-      const blob = await new Promise((resolve) => {
-        current.recorder.addEventListener("stop", () => resolve(new Blob(current.chunks, { type: current.recorder.mimeType || "audio/webm" })), { once: true });
-        current.recorder.stop();
-      });
-      stopStream(current.stream);
-      if (blob.size > 0) {
-        recordingId = `${current.drillId}-${current.slot}-${Date.now()}`;
-        try {
-          await ctx.saveRecording(recordingId, blob);
-        } catch {
-          recordingId = null;
-          ctx.showToast("录音保存失败，本次按只计时处理。", "danger");
-        }
-      }
-    }
-    runtime = null;
     const drill = state.activeDrill;
-    if (!drill || drill.drillId !== current.drillId) return;
-    const take = { recordingId, durationSeconds, noRecording: !recordingId };
-    await goToPhase({ ...drill, takes: { ...drill.takes, [current.slot]: take } });
+    const slot = takeSlot(drill?.phase);
+    const result = await takes.finish();
+    if (!result || !slot || state.activeDrill?.drillId !== drill.drillId) return;
+    const current = state.activeDrill;
+    await goToPhase({ ...current, takes: { ...current.takes, [slot]: result.take } });
   }
 
   function cancelTake() {
-    if (!runtime) return;
-    try {
-      if (runtime.recorder?.state === "recording") runtime.recorder.stop();
-    } catch {
-      // 录音器无法正常停止时，下方仍会释放麦克风
-    }
-    stopStream(runtime.stream);
-    runtime = null;
+    takes.cancel();
   }
 
   async function abandon() {
@@ -251,18 +180,19 @@ export function createArenaController(ctx) {
     const progress = ctx.root.querySelector("[data-drill-progress]");
     const now = Date.now();
     if (drill.phase === "take1" || drill.phase === "take2") {
-      if (runtime?.status !== "running") return;
-      const elapsed = (now - runtime.startedAt) / 1000;
+      const elapsed = takes.elapsedSeconds();
+      if (elapsed == null) return;
+      const flags = takes.current.flags;
       if (clock) clock.textContent = `${formatClock(elapsed)} / ${formatClock(card.speakSeconds)}`;
       if (progress) progress.value = Math.min(elapsed, card.speakSeconds);
-      if (drill.phase === "take1" && !runtime.interruptShown && elapsed >= drill.interruptAt) {
-        runtime.interruptShown = true;
+      if (drill.phase === "take1" && !flags.interruptShown && elapsed >= drill.interruptAt) {
+        flags.interruptShown = true;
         const banner = ctx.root.querySelector("[data-drill-interrupt]");
         if (banner) banner.hidden = false;
         ctx.playTone();
       }
-      if (!runtime.overtimeShown && elapsed >= card.speakSeconds) {
-        runtime.overtimeShown = true;
+      if (!flags.overtimeShown && elapsed >= card.speakSeconds) {
+        flags.overtimeShown = true;
         const overtime = ctx.root.querySelector("[data-drill-overtime]");
         if (overtime) overtime.hidden = false;
         ctx.playTone();
@@ -426,9 +356,10 @@ export function createArenaController(ctx) {
   function renderTake(drill, card) {
     const isFirst = drill.phase === "take1";
     const focus = CHECKS[drill.focusCheckId];
-    const recording = Boolean(runtime?.recorder);
-    const running = runtime?.status === "running";
-    const requesting = runtime?.status === "requesting";
+    const recording = Boolean(takes.current?.recorder);
+    const running = takes.isRunning();
+    const requesting = takes.isRequesting();
+    const flags = takes.current?.flags ?? {};
     const liveLabel = running
       ? `<span class="rec-dot" aria-hidden="true"></span><span>${recording ? "正在录音" : "只计时（未录音）"}</span>`
       : requesting ? "<span>正在请求麦克风权限…</span>" : "<span>还没有开始</span>";
@@ -446,8 +377,8 @@ export function createArenaController(ctx) {
       <section class="drill-stage-card${running ? " is-live" : ""}">
         <div class="drill-live-head">${liveLabel}</div>
         ${renderClock(card.speakSeconds, isFirst ? "首次表达" : "重讲")}
-        ${isFirst ? `<div class="drill-pressure" data-drill-interrupt${hiddenUnless(runtime?.interruptShown)} role="alert"><span>${icon("alert")}对方打断了你</span><strong>${escapeHtml(pressureText(drill.interruptId))}</strong><small>先正面接住这句话，再回到你的主线。</small></div>` : `<div class="drill-pressure is-followup"><span>开场先回应</span><strong>${escapeHtml(pressureText(drill.followupId))}</strong></div>${focus ? `<p class="drill-focus-inline">${icon("target")}只改一项：${escapeHtml(focus.label)}</p>` : ""}`}
-        <p class="drill-overtime" data-drill-overtime${hiddenUnless(runtime?.overtimeShown)} role="status">时间到了，用一句话收尾。${OVERTIME_GRACE_SECONDS} 秒后自动结束。</p>
+        ${isFirst ? `<div class="drill-pressure" data-drill-interrupt${hiddenUnless(flags.interruptShown)} role="alert"><span>${icon("alert")}对方打断了你</span><strong>${escapeHtml(pressureText(drill.interruptId))}</strong><small>先正面接住这句话，再回到你的主线。</small></div>` : `<div class="drill-pressure is-followup"><span>开场先回应</span><strong>${escapeHtml(pressureText(drill.followupId))}</strong></div>${focus ? `<p class="drill-focus-inline">${icon("target")}只改一项：${escapeHtml(focus.label)}</p>` : ""}`}
+        <p class="drill-overtime" data-drill-overtime${hiddenUnless(flags.overtimeShown)} role="status">时间到了，用一句话收尾。${OVERTIME_GRACE_SECONDS} 秒后自动结束。</p>
       </section>
       <div class="drill-actions">${actions}</div>`;
   }
@@ -462,6 +393,13 @@ export function createArenaController(ctx) {
         <div class="check-toggle" role="group" aria-label="${escapeHtml(definition.label)}"><button type="button" class="${value === true ? "is-active" : ""}" aria-pressed="${value === true}" data-action="drill-check" data-slot="${slot}" data-check="${id}" data-value="yes">做到</button><button type="button" class="${value === false ? "is-active" : ""}" aria-pressed="${value === false}" data-action="drill-check" data-slot="${slot}" data-check="${id}" data-value="no">没做到</button></div>
       </div>`;
     }).join("")}</div>`;
+  }
+
+  /** 回听时对照学习模式中这一类场景的推荐结构（只给步骤与句式，不给示范答案）。 */
+  function renderStructureReference(card) {
+    const lesson = LESSON_MAP.get(card.scenarioId);
+    if (!lesson) return "";
+    return `<details class="structure-reference"><summary>${icon("book")}对照推荐结构：${escapeHtml(lesson.structure)}</summary><ol>${lesson.steps.map((item) => `<li><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.phrase)}</span></li>`).join("")}</ol></details>`;
   }
 
   function renderAudio(take, label) {
@@ -482,6 +420,7 @@ export function createArenaController(ctx) {
         ${isFirst ? `<p class="drill-hint">讲到一半时的打断是：${escapeHtml(pressureText(drill.interruptId))}</p>` : ""}
         <div class="drill-audio-row">${isFirst ? renderAudio(drill.takes.first, "首次表达") : `${renderAudio(drill.takes.first, "首次表达")}${renderAudio(drill.takes.second, "重讲")}`}</div>
         ${renderCheckList(drill, card, slot)}
+        ${renderStructureReference(card)}
       </section>
       ${isFirst && judged ? `<section class="drill-panel"><h3>${icon("target")}重讲时只改一项</h3><p class="drill-hint">一次只改一个行为，改得最快。系统已按“没做到”的项建议，你可以改选。</p><div class="focus-options">${focusOptions.map((id) => `<button type="button" class="focus-option${drill.focusCheckId === id ? " is-active" : ""}" aria-pressed="${drill.focusCheckId === id}" data-action="drill-focus" data-check="${id}"><strong>${escapeHtml(CHECKS[id].label)}</strong><span>${escapeHtml(CHECKS[id].tip)}</span></button>`).join("")}</div></section>` : ""}
       ${!isFirst ? `<section class="drill-panel"><label class="field"><span>这一回合带走的一句话（下次开口前读一遍）</span><textarea rows="2" data-drill-lesson placeholder="例如：被质疑时先说“你说得对的部分是……”">${escapeHtml(drill.lesson)}</textarea></label></section>` : ""}

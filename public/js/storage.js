@@ -2,6 +2,8 @@ import { TASK_CARDS } from "./data/cards.js";
 import { stageMinutes as sessionStageMinutes } from "./core/session.js";
 import { ARENA_CARD_MAP, PRESSURES } from "./arena/scenarios.js";
 import { DRILL_MODES, DRILL_PHASES, DRILL_STATUSES } from "./arena/engine.js";
+import { LESSON_PHASES, LESSON_STATUSES, LESSON_TAKES, checkKeys } from "./arena/lesson-engine.js";
+import { LESSON_MAP } from "./arena/lessons.js";
 
 const DB_NAME = "speak-clearly-local";
 // v2 新增 drills（实战回合）对象仓库
@@ -16,6 +18,8 @@ const MAX_SENSITIVE_SKIPS = 365;
 const MAX_SESSIONS = 10_000;
 const MAX_DRILLS = 10_000;
 const MAX_DRILL_NOTES = 12;
+const MAX_LESSON_RUNS = 2_000;
+const HOME_TRACKS = ["learn", "practice"];
 const MAX_SOURCES = 20;
 const MAX_STRING_LENGTH = 4_000;
 const CARD_MAP = new Map(TASK_CARDS.map((card) => [card.id, card]));
@@ -27,6 +31,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   reducedMotion: false,
   keepRecordings: true,
   onboardingComplete: false,
+  homeTrack: "learn",
 });
 
 let databasePromise;
@@ -297,6 +302,12 @@ function normalizeSettings(value, { allowPartial = false } = {}) {
       throw new Error("导入文件中的默认训练模式无效");
     }
     settings.defaultMode = value.defaultMode;
+  }
+  if (value.homeTrack != null) {
+    if (!HOME_TRACKS.includes(value.homeTrack)) {
+      throw new Error("导入文件中的首页模式无效");
+    }
+    settings.homeTrack = value.homeTrack;
   }
   for (const key of ["soundEnabled", "reducedMotion", "keepRecordings", "onboardingComplete"]) {
     settings[key] = booleanValue(value[key], key, settings[key]);
@@ -663,6 +674,55 @@ function normalizeDrill(raw, { stripRecordings = false } = {}) {
   };
 }
 
+/**
+ * 规范化学习模式的一次课程记录；示范卡与迁移卡必须属于这一课的场景。
+ */
+function normalizeLessonRun(raw, { stripRecordings = false } = {}) {
+  if (!isPlainObject(raw)) {
+    throw new Error("导入文件中的学习记录无效");
+  }
+  const scenarioId = identifier(raw.scenarioId, "课程场景");
+  if (!LESSON_MAP.has(scenarioId)) {
+    throw new Error(`导入文件引用了不存在的课程：${scenarioId}`);
+  }
+  const cardFor = (value, field) => {
+    const card = ARENA_CARD_MAP.get(identifier(value, field));
+    if (!card || card.scenarioId !== scenarioId) {
+      throw new Error(`导入文件中的${field}无效`);
+    }
+    return card.id;
+  };
+  const status = oneOf(raw.status, LESSON_STATUSES, "学习状态");
+  const run = {
+    runId: identifier(raw.runId, "学习记录 ID"),
+    schemaVersion: 1,
+    scenarioId,
+    exampleCardId: cardFor(raw.exampleCardId, "示范卡"),
+    transferCardId: cardFor(raw.transferCardId, "迁移卡"),
+    phase: oneOf(raw.phase, LESSON_PHASES, "学习阶段"),
+    status,
+    startedAt: isoDate(raw.startedAt, "学习开始时间", { required: true }),
+    completedAt: isoDate(raw.completedAt, "学习完成时间", { required: status === "completed" }),
+    takes: {},
+    checks: {},
+    lesson: text(raw.lesson, "带走的一句话", { max: 500 }),
+  };
+  const allowedKeys = new Set([...checkKeys(run, "check1"), ...checkKeys(run, "check3")]);
+  for (const slot of LESSON_TAKES) {
+    run.takes[slot] = normalizeDrillTake(raw.takes?.[slot], "学习表达", stripRecordings);
+    run.checks[slot] = normalizeDrillChecks(raw.checks?.[slot], "学习检查", [...allowedKeys]);
+  }
+  return run;
+}
+
+function normalizeStoredLessonRun(raw) {
+  try {
+    return normalizeLessonRun(raw);
+  } catch {
+    return null;
+  }
+}
+
 function normalizeStoredDrill(raw) {
   try {
     return normalizeDrill(raw);
@@ -724,12 +784,20 @@ function normalizeImportDocument(data) {
     }
     drillIds.add(drill.drillId);
   }
+  if (data.lessonRuns != null && (!Array.isArray(data.lessonRuns) || data.lessonRuns.length > MAX_LESSON_RUNS)) {
+    throw new Error("导入文件中的学习记录列表无效");
+  }
+  const lessonRuns = (data.lessonRuns ?? []).map((run) => normalizeLessonRun(run, { stripRecordings: true }));
+  if (new Set(lessonRuns.map((run) => run.runId)).size !== lessonRuns.length) {
+    throw new Error("导入文件包含重复学习记录");
+  }
   return {
     settings: normalizeSettings(data.settings ?? {}, { allowPartial: true }),
     sessions,
     activeSession,
     favorites,
     drills,
+    lessonRuns,
   };
 }
 
@@ -746,6 +814,7 @@ async function readCurrentSnapshot() {
       activeSession: fallback.activeSession ?? null,
       favorites: Array.isArray(fallback.favorites) ? fallback.favorites : [],
       drills: Array.isArray(fallback.drills) ? fallback.drills : [],
+      lessonRuns: Array.isArray(fallback.lessonRuns) ? fallback.lessonRuns : [],
     };
   }
   return {
@@ -758,10 +827,12 @@ async function readCurrentSnapshot() {
       const settingsRequest = kv.get("settings");
       const activeRequest = kv.get("activeSession");
       const favoritesRequest = kv.get("favorites");
+      const lessonRunsRequest = kv.get("lessonRuns");
       const sessionsRequest = sessions.getAll();
       settingsRequest.onsuccess = () => { result.settings = settingsRequest.result ?? null; };
       activeRequest.onsuccess = () => { result.activeSession = activeRequest.result ?? null; };
       favoritesRequest.onsuccess = () => { result.favorites = favoritesRequest.result ?? []; };
+      lessonRunsRequest.onsuccess = () => { result.lessonRuns = lessonRunsRequest.result ?? []; };
       sessionsRequest.onsuccess = () => { result.sessions = sessionsRequest.result ?? []; };
       drillsRequest.onsuccess = () => { result.drills = drillsRequest.result ?? []; };
       return result;
@@ -811,6 +882,27 @@ function mergeDrills(existing, imported) {
     .slice(-MAX_DRILLS);
 }
 
+/** 合并学习记录：同 ID 时保留本机录音引用。 */
+function mergeLessonRuns(existing, imported) {
+  const merged = new Map();
+  for (const run of existing) {
+    const normalized = normalizeStoredLessonRun(run);
+    if (normalized) merged.set(normalized.runId, normalized);
+  }
+  for (const run of imported) {
+    const local = merged.get(run.runId);
+    if (!local) {
+      merged.set(run.runId, run);
+      continue;
+    }
+    const takes = Object.fromEntries(LESSON_TAKES.map((slot) => [slot, local.takes[slot].recordingId ? local.takes[slot] : run.takes[slot]]));
+    merged.set(run.runId, { ...run, takes });
+  }
+  return [...merged.values()]
+    .sort((left, right) => new Date(left.startedAt).getTime() - new Date(right.startedAt).getTime())
+    .slice(-MAX_LESSON_RUNS);
+}
+
 function mergeSessions(existing, imported) {
   const merged = new Map();
   for (const session of existing) {
@@ -837,6 +929,7 @@ async function commitImport(snapshot, data) {
   }
   const sessions = mergeSessions(snapshot.sessions, data.sessions);
   const drills = mergeDrills(snapshot.drills ?? [], data.drills ?? []);
+  const lessonRuns = mergeLessonRuns(snapshot.lessonRuns ?? [], data.lessonRuns ?? []);
   const activeSession = data.activeSession
     ? preserveLocalRecordingReferences(existingActive, data.activeSession)
     : null;
@@ -849,6 +942,7 @@ async function commitImport(snapshot, data) {
       activeSession,
       favorites: data.favorites,
       drills,
+      lessonRuns,
     });
     return;
   }
@@ -867,6 +961,7 @@ async function commitImport(snapshot, data) {
     }
     kv.put(data.settings, "settings");
     kv.put(data.favorites, "favorites");
+    kv.put(lessonRuns, "lessonRuns");
     kv.put(activeSession, "activeSession");
   });
 }
@@ -978,6 +1073,29 @@ export async function loadDrills() {
   } catch {
     return (fallbackRead().drills ?? []).map(normalizeStoredDrill).filter(Boolean);
   }
+}
+
+export async function loadLessonRuns() {
+  const value = await getKey("lessonRuns", []);
+  return Array.isArray(value) ? value.map(normalizeStoredLessonRun).filter(Boolean) : [];
+}
+
+export async function loadActiveLesson() {
+  const value = await getKey("activeLesson", null);
+  return value ? normalizeStoredLessonRun(value) : null;
+}
+
+/**
+ * 保存当前课程；完成或放弃时同时写入学习记录列表。
+ *
+ * @param {object|null} run 课程记录；传 null 表示清空当前课程
+ */
+export async function saveLessonProgress(run) {
+  if (run && run.status !== "in_progress") {
+    const runs = (await loadLessonRuns()).filter((item) => item.runId !== run.runId);
+    await setKey("lessonRuns", [...runs, run].slice(-MAX_LESSON_RUNS));
+  }
+  await setKey("activeLesson", run);
 }
 
 export async function loadActiveDrill() {
@@ -1181,12 +1299,13 @@ function sanitizeSessionForExport(session) {
 }
 
 export async function exportLocalData() {
-  const [settings, sessions, activeSession, favorites, drills] = await Promise.all([
+  const [settings, sessions, activeSession, favorites, drills, lessonRuns] = await Promise.all([
     loadSettings(),
     loadSessions(),
     loadActiveSession(),
     loadFavorites(),
     loadDrills(),
+    loadLessonRuns(),
   ]);
   const activeHasRecording = Boolean(activeSession?.recordingFirstId || activeSession?.recordingRetryId);
   return {
@@ -1201,6 +1320,7 @@ export async function exportLocalData() {
     activeSession: activeHasRecording ? null : sanitizeSessionForExport(activeSession),
     favorites: [...favorites],
     drills: drills.map((drill) => normalizeDrill(drill, { stripRecordings: true })),
+    lessonRuns: lessonRuns.map((run) => normalizeLessonRun(run, { stripRecordings: true })),
   };
 }
 
@@ -1248,6 +1368,7 @@ export async function clearAllData() {
 export const __storageTestables = Object.freeze({
   normalizeDrill,
   normalizeImportDocument,
+  normalizeLessonRun,
   normalizeSession,
   sanitizeSessionForExport,
 });
