@@ -92,7 +92,7 @@ function importDocument(overrides = {}) {
   };
 }
 
-function openDatabase(indexedDB, name = "speak-clearly-local", version = 1) {
+function openDatabase(indexedDB, name = "speak-clearly-local", version = 2) {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(name, version);
     request.onsuccess = () => resolve(request.result);

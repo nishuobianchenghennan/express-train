@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "speak-clearly-";
-const CACHE_NAME = `${CACHE_PREFIX}2026.09.28-9`;
+const CACHE_NAME = `${CACHE_PREFIX}2026.10.03-3`;
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -14,6 +14,10 @@ const APP_SHELL = [
   "/js/core/selection.js",
   "/js/core/session.js",
   "/js/core/stats.js",
+  "/js/arena/industries.js",
+  "/js/arena/scenarios.js",
+  "/js/arena/engine.js",
+  "/js/arena/ui.js",
 ];
 const VERSIONED_ASSET_PATHS = new Set(APP_SHELL.filter((path) => path !== "/" && path !== "/index.html"));
 

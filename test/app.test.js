@@ -52,7 +52,7 @@ test("service worker precaches one complete version of the module graph", async 
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-cache");
     assert.match(body, /CACHE_PREFIX.*speak-clearly-/);
-    assert.match(body, /2026\.09\.28-9/);
+    assert.match(body, /2026\.10\.03-3/);
     assert.match(body, /key\.startsWith\(CACHE_PREFIX\).*key !== CACHE_NAME/);
     assert.match(body, /\/js\/data\/card-additions\.js/);
     assert.match(body, /fetch\(request, \{ cache: "no-store" \}\)/);
@@ -76,23 +76,31 @@ test("modal form controls are not treated as backdrop close actions", async () =
   assert.match(source, /state\.modal && modalPanel\?\.contains\(event\.target\) && !explicitModalControl/);
 });
 
-test("all home choices use one five-second topic draw result before starting a session", async () => {
+test("home draws one adaptive arena card in five seconds before starting a drill", async () => {
+  const source = await readFile(new URL("../public/js/app.js", import.meta.url), "utf8");
+  assert.match(source, /const TOPIC_DRAW_DURATION_MS = 5_000/);
+  assert.match(source, /function idleTopicCards\(family\)/);
+  assert.match(source, /const selection = selectArenaCard\(\{ drills: state\.drills, family: requestedScene \|\| "" \}\)/);
+  assert.match(source, /winnerId: selection\.card\.id/);
+  assert.match(source, /status === "settled" && index === winnerIndex/);
+  assert.match(source, /revisitOf: draw\.revisitOf/);
+  assert.match(source, /avoidPressures: draw\.avoidPressures/);
+  assert.match(source, /await arena\.startDrill\(card,/);
+  assert.doesNotMatch(source, /function resolveHomeSelection/);
+  assert.match(source, /function applyTopicDrawMotion\(\)/);
+  assert.match(source, /root\.innerHTML = renderHome\(\);\n\s+applyTopicDrawMotion\(\);/);
+  assert.match(source, /duration: TOPIC_DRAW_DURATION_MS, easing: TOPIC_DRAW_EASING, fill: "forwards"/);
+  assert.match(source, /startedAt: performance\.now\(\)/);
+});
+
+test("topic draw track never relies on inline style attributes blocked by CSP", async () => {
   const [source, styles] = await Promise.all([
     readFile(new URL("../public/js/app.js", import.meta.url), "utf8"),
     readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
   ]);
-  assert.match(source, /const TOPIC_DRAW_DURATION_MS = 5_000/);
-  assert.match(source, /function idleTopicCards\(scene\)/);
-  assert.match(source, /!state\.activeSession \? renderTopicDraw\(draw\) : ""/);
-  assert.match(source, /function resolveHomeSelection/);
-  assert.match(source, /winnerId: selection\.card\.id/);
-  assert.match(source, /status === "settled" && index === winnerIndex/);
-  assert.match(source, /annualPlanDate: draw\.annualPlanDate/);
-  assert.match(source, /annualPlanDayNumber: draw\.annualPlanDayNumber/);
-  assert.match(styles, /animation: topic-draw-roll 5s linear forwards/);
-  assert.match(styles, /48% \{ transform: translate3d\(var\(--draw-p4\)/);
-  assert.match(styles, /96% \{ transform: translate3d\(var\(--draw-p9\)/);
-  assert.match(styles, /100% \{ transform: translate3d\(var\(--draw-offset\)/);
+  assert.doesNotMatch(source, /topic-draw-track[^`]*style="/);
+  assert.doesNotMatch(styles, /var\(--(draw|idle)-(offset|p\d)\)/);
+  assert.match(source, /data-draw-offset="\$\{offset\}" data-idle-offset="\$\{idleOffset\}"/);
 });
 
 test("browser routes fall back to the application shell", async () => {

@@ -1,8 +1,11 @@
 import { TASK_CARDS } from "./data/cards.js";
 import { stageMinutes as sessionStageMinutes } from "./core/session.js";
+import { ARENA_CARD_MAP, PRESSURES } from "./arena/scenarios.js";
+import { DRILL_MODES, DRILL_PHASES, DRILL_STATUSES } from "./arena/engine.js";
 
 const DB_NAME = "speak-clearly-local";
-const DB_VERSION = 1;
+// v2 新增 drills（实战回合）对象仓库
+const DB_VERSION = 2;
 const FALLBACK_KEY = "speak-clearly-fallback";
 const STAGES = ["preview", "research", "organize", "firstDelivery", "review", "retry", "complete"];
 const CURRENT_STAGES = ["preview", "research", "firstDelivery", "review", "retry", "complete"];
@@ -11,6 +14,8 @@ const MODES = ["full", "quick"];
 const SOURCE_KINDS = ["fact", "viewpoint", "counter"];
 const MAX_SENSITIVE_SKIPS = 365;
 const MAX_SESSIONS = 10_000;
+const MAX_DRILLS = 10_000;
+const MAX_DRILL_NOTES = 12;
 const MAX_SOURCES = 20;
 const MAX_STRING_LENGTH = 4_000;
 const CARD_MAP = new Map(TASK_CARDS.map((card) => [card.id, card]));
@@ -83,6 +88,9 @@ function openDatabase() {
       }
       if (!database.objectStoreNames.contains("recordings")) {
         database.createObjectStore("recordings", { keyPath: "id" });
+      }
+      if (!database.objectStoreNames.contains("drills")) {
+        database.createObjectStore("drills", { keyPath: "drillId" });
       }
     };
     request.onsuccess = () => {
@@ -552,6 +560,117 @@ function normalizeSession(raw, { active = false, stripRecordings = false } = {})
   return normalized;
 }
 
+function normalizeDrillTake(value, field, stripRecordings) {
+  const take = isPlainObject(value) ? value : {};
+  const recordingId = take.recordingId == null || stripRecordings ? null : identifier(take.recordingId, `${field}录音 ID`);
+  return {
+    recordingId,
+    durationSeconds: take.durationSeconds == null ? null : finiteNumber(take.durationSeconds, `${field}时长`, { min: 0, max: 3_600 }),
+    noRecording: booleanValue(take.noRecording, `${field}无录音标记`) || Boolean(stripRecordings && take.recordingId),
+  };
+}
+
+function normalizeDrillChecks(value, field, allowed) {
+  if (value == null) {
+    return {};
+  }
+  if (!isPlainObject(value)) {
+    throw new Error(`导入文件中的${field}无效`);
+  }
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!allowed.includes(key)) {
+      throw new Error(`导入文件中的${field}包含未知检查项：${key}`);
+    }
+    result[key] = booleanValue(item, `${field}.${key}`);
+  }
+  return result;
+}
+
+function oneOf(value, allowed, field) {
+  if (!allowed.includes(value)) {
+    throw new Error(`导入文件中的${field}无效`);
+  }
+  return value;
+}
+
+function normalizeDrillNotes(value) {
+  if (value == null) {
+    return {};
+  }
+  if (!isPlainObject(value) || Object.keys(value).length > MAX_DRILL_NOTES) {
+    throw new Error("导入文件中的补课笔记无效");
+  }
+  const notes = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!/^\d{1,2}$/.test(key)) {
+      throw new Error("导入文件中的补课笔记无效");
+    }
+    notes[key] = text(item, "补课笔记", { max: 1_000 });
+  }
+  return notes;
+}
+
+/**
+ * 规范化实战回合记录；卡片元数据以当前题库为准重新派生，避免导入数据伪造。
+ *
+ * @param {object} raw 原始记录
+ * @param {{ stripRecordings?: boolean }} options 导入/导出时剥离录音引用
+ * @returns {object} 规范化后的回合
+ */
+function normalizeDrill(raw, { stripRecordings = false } = {}) {
+  if (!isPlainObject(raw)) {
+    throw new Error("导入文件中的实战回合无效");
+  }
+  const cardId = identifier(raw.cardId, "实战卡 ID");
+  const card = ARENA_CARD_MAP.get(cardId);
+  if (!card) {
+    throw new Error(`导入文件引用了不存在的实战卡：${cardId}`);
+  }
+  const pressureIds = Object.keys(PRESSURES);
+  const status = oneOf(raw.status, DRILL_STATUSES, "回合状态");
+  return {
+    drillId: identifier(raw.drillId, "回合 ID"),
+    schemaVersion: 1,
+    cardId,
+    cardVersion: text(raw.cardVersion, "实战卡版本", { max: 40 }) || card.version,
+    scenarioId: card.scenarioId,
+    industryId: card.industryId,
+    family: card.family,
+    title: card.title,
+    mode: oneOf(raw.mode, DRILL_MODES, "回合模式"),
+    status,
+    phase: oneOf(raw.phase, DRILL_PHASES, "回合阶段"),
+    phaseStartedAt: raw.phaseStartedAt == null ? null : finiteNumber(raw.phaseStartedAt, "阶段开始时间", { min: 0 }),
+    startedAt: isoDate(raw.startedAt, "回合开始时间", { required: true }),
+    completedAt: isoDate(raw.completedAt, "回合完成时间", { required: status === "completed" }),
+    selectionReason: text(raw.selectionReason, "选题原因", { max: 200 }),
+    revisitOf: raw.revisitOf == null ? null : identifier(raw.revisitOf, "复练来源 ID"),
+    interruptId: oneOf(raw.interruptId, pressureIds, "打断事件"),
+    interruptAt: finiteNumber(raw.interruptAt, "打断时间", { min: 0, max: 3_600, integer: true }),
+    followupId: oneOf(raw.followupId, pressureIds, "追问事件"),
+    takes: {
+      first: normalizeDrillTake(raw.takes?.first, "首次表达", stripRecordings),
+      second: normalizeDrillTake(raw.takes?.second, "重讲", stripRecordings),
+    },
+    checks: {
+      first: normalizeDrillChecks(raw.checks?.first, "首次检查", card.checks),
+      second: normalizeDrillChecks(raw.checks?.second, "重讲检查", card.checks),
+    },
+    focusCheckId: raw.focusCheckId == null ? null : oneOf(raw.focusCheckId, card.checks, "重讲目标"),
+    notes: normalizeDrillNotes(raw.notes),
+    lesson: text(raw.lesson, "带走的一句话", { max: 500 }),
+  };
+}
+
+function normalizeStoredDrill(raw) {
+  try {
+    return normalizeDrill(raw);
+  } catch {
+    return null;
+  }
+}
+
 function normalizeStoredSession(raw, active = false) {
   try {
     return normalizeSession(raw, { active, stripRecordings: false });
@@ -594,11 +713,23 @@ function normalizeImportDocument(data) {
       throw new Error(`导入文件收藏了不存在的题卡：${id}`);
     }
   }
+  if (data.drills != null && (!Array.isArray(data.drills) || data.drills.length > MAX_DRILLS)) {
+    throw new Error("导入文件中的实战回合列表无效");
+  }
+  const drills = (data.drills ?? []).map((drill) => normalizeDrill(drill, { stripRecordings: true }));
+  const drillIds = new Set();
+  for (const drill of drills) {
+    if (drillIds.has(drill.drillId)) {
+      throw new Error(`导入文件包含重复实战回合：${drill.drillId}`);
+    }
+    drillIds.add(drill.drillId);
+  }
   return {
     settings: normalizeSettings(data.settings ?? {}, { allowPartial: true }),
     sessions,
     activeSession,
     favorites,
+    drills,
   };
 }
 
@@ -614,13 +745,15 @@ async function readCurrentSnapshot() {
       sessions: Array.isArray(fallback.sessions) ? fallback.sessions : [],
       activeSession: fallback.activeSession ?? null,
       favorites: Array.isArray(fallback.favorites) ? fallback.favorites : [],
+      drills: Array.isArray(fallback.drills) ? fallback.drills : [],
     };
   }
   return {
     backend: "indexeddb",
-    ...(await runTransaction(database, ["kv", "sessions"], "readonly", (transaction) => {
+    ...(await runTransaction(database, ["kv", "sessions", "drills"], "readonly", (transaction) => {
       const kv = transaction.objectStore("kv");
       const sessions = transaction.objectStore("sessions");
+      const drillsRequest = transaction.objectStore("drills").getAll();
       const result = {};
       const settingsRequest = kv.get("settings");
       const activeRequest = kv.get("activeSession");
@@ -630,6 +763,7 @@ async function readCurrentSnapshot() {
       activeRequest.onsuccess = () => { result.activeSession = activeRequest.result ?? null; };
       favoritesRequest.onsuccess = () => { result.favorites = favoritesRequest.result ?? []; };
       sessionsRequest.onsuccess = () => { result.sessions = sessionsRequest.result ?? []; };
+      drillsRequest.onsuccess = () => { result.drills = drillsRequest.result ?? []; };
       return result;
     })),
   };
@@ -658,6 +792,25 @@ function preserveLocalRecordingReferences(existing, imported) {
   return next;
 }
 
+/** 合并实战回合：同 ID 时保留本机录音引用，其余以导入内容为准。 */
+function mergeDrills(existing, imported) {
+  const merged = new Map();
+  for (const drill of existing) {
+    const normalized = normalizeStoredDrill(drill);
+    if (normalized) {
+      merged.set(normalized.drillId, normalized);
+    }
+  }
+  for (const drill of imported) {
+    const local = merged.get(drill.drillId);
+    const keepTake = (slot) => (local?.takes[slot].recordingId ? local.takes[slot] : drill.takes[slot]);
+    merged.set(drill.drillId, local ? { ...drill, takes: { first: keepTake("first"), second: keepTake("second") } } : drill);
+  }
+  return [...merged.values()]
+    .sort((left, right) => new Date(left.startedAt).getTime() - new Date(right.startedAt).getTime())
+    .slice(-MAX_DRILLS);
+}
+
 function mergeSessions(existing, imported) {
   const merged = new Map();
   for (const session of existing) {
@@ -683,6 +836,7 @@ async function commitImport(snapshot, data) {
     throw new Error("当前设备还有进行中的训练，请先完成或结束后再导入其他进度");
   }
   const sessions = mergeSessions(snapshot.sessions, data.sessions);
+  const drills = mergeDrills(snapshot.drills ?? [], data.drills ?? []);
   const activeSession = data.activeSession
     ? preserveLocalRecordingReferences(existingActive, data.activeSession)
     : null;
@@ -694,13 +848,19 @@ async function commitImport(snapshot, data) {
       sessions,
       activeSession,
       favorites: data.favorites,
+      drills,
     });
     return;
   }
   const database = await openDatabase();
-  await runTransaction(database, ["kv", "sessions"], "readwrite", (transaction) => {
+  await runTransaction(database, ["kv", "sessions", "drills"], "readwrite", (transaction) => {
     const kv = transaction.objectStore("kv");
     const sessionStore = transaction.objectStore("sessions");
+    const drillStore = transaction.objectStore("drills");
+    drillStore.clear();
+    for (const drill of drills) {
+      drillStore.put(drill);
+    }
     sessionStore.clear();
     for (const session of sessions) {
       sessionStore.put(session);
@@ -805,6 +965,51 @@ export async function saveCompletedSession(session) {
   await runTransaction(database, ["sessions", "kv"], "readwrite", (transaction) => {
     transaction.objectStore("sessions").put(session);
     transaction.objectStore("kv").put(session, "activeSession");
+  });
+}
+
+export async function loadDrills() {
+  try {
+    const database = await openDatabase();
+    const drills = await runTransaction(database, "drills", "readonly", (transaction) =>
+      requestValue(transaction.objectStore("drills").getAll()),
+    );
+    return drills.map(normalizeStoredDrill).filter(Boolean);
+  } catch {
+    return (fallbackRead().drills ?? []).map(normalizeStoredDrill).filter(Boolean);
+  }
+}
+
+export async function loadActiveDrill() {
+  const value = await getKey("activeDrill", null);
+  return value ? normalizeStoredDrill(value) : null;
+}
+
+/**
+ * 保存当前回合；已完成或放弃的回合在同一事务中写入历史仓库。
+ *
+ * @param {object|null} drill 回合；传 null 表示清空当前回合
+ */
+export async function saveDrillProgress(drill) {
+  const archived = Boolean(drill && drill.status !== "in_progress");
+  let database;
+  try {
+    database = await openDatabase();
+  } catch {
+    const data = fallbackRead();
+    data.activeDrill = drill;
+    if (archived) {
+      const drills = (Array.isArray(data.drills) ? data.drills : []).filter((item) => item.drillId !== drill.drillId);
+      data.drills = [...drills, drill].slice(-MAX_DRILLS);
+    }
+    fallbackWrite(data);
+    return;
+  }
+  await runTransaction(database, archived ? ["kv", "drills"] : "kv", "readwrite", (transaction) => {
+    transaction.objectStore("kv").put(drill, "activeDrill");
+    if (archived) {
+      transaction.objectStore("drills").put(drill);
+    }
   });
 }
 
@@ -952,7 +1157,8 @@ export async function storageSummary() {
   } catch {
     // Metadata remains available even if recording storage cannot be inspected.
   }
-  return { sessionCount: sessions.length, recordingCount, recordingBytes };
+  const drills = await loadDrills();
+  return { sessionCount: sessions.length, drillCount: drills.length, recordingCount, recordingBytes };
 }
 
 function sanitizeSessionForExport(session) {
@@ -975,11 +1181,12 @@ function sanitizeSessionForExport(session) {
 }
 
 export async function exportLocalData() {
-  const [settings, sessions, activeSession, favorites] = await Promise.all([
+  const [settings, sessions, activeSession, favorites, drills] = await Promise.all([
     loadSettings(),
     loadSessions(),
     loadActiveSession(),
     loadFavorites(),
+    loadDrills(),
   ]);
   const activeHasRecording = Boolean(activeSession?.recordingFirstId || activeSession?.recordingRetryId);
   return {
@@ -993,6 +1200,7 @@ export async function exportLocalData() {
     sessions: sessions.map(sanitizeSessionForExport),
     activeSession: activeHasRecording ? null : sanitizeSessionForExport(activeSession),
     favorites: [...favorites],
+    drills: drills.map((drill) => normalizeDrill(drill, { stripRecordings: true })),
   };
 }
 
@@ -1038,6 +1246,7 @@ export async function clearAllData() {
 }
 
 export const __storageTestables = Object.freeze({
+  normalizeDrill,
   normalizeImportDocument,
   normalizeSession,
   sanitizeSessionForExport,
