@@ -1,9 +1,26 @@
-import { TASK_CARDS } from "./data/cards.js";
-import { stageMinutes as sessionStageMinutes } from "./core/session.js";
-import { ARENA_CARD_MAP, PRESSURES } from "./arena/scenarios.js";
-import { DRILL_MODES, DRILL_PHASES, DRILL_STATUSES } from "./arena/engine.js";
-import { LESSON_PHASES, LESSON_STATUSES, LESSON_TAKES, checkKeys } from "./arena/lesson-engine.js";
-import { LESSON_MAP } from "./arena/lessons.js";
+import { TASK_CARDS } from "./legacy/cards.js";
+import { stageMinutes as sessionStageMinutes } from "./legacy/session.js";
+import { ARENA_CARD_MAP } from "./legacy/scenarios.js";
+import { PRESSURES } from "./curriculum/checks.js";
+import {
+  LEGACY_DRILL_MODES as DRILL_MODES,
+  LEGACY_DRILL_PHASES as DRILL_PHASES,
+  LEGACY_DRILL_STATUSES as DRILL_STATUSES,
+  LEGACY_LESSON_PHASES as LESSON_PHASES,
+  LEGACY_LESSON_STATUSES as LESSON_STATUSES,
+  LEGACY_LESSON_TAKES as LESSON_TAKES,
+  legacyLessonCheckKeys as checkKeys,
+} from "./legacy/engines.js";
+import { LESSON_MAP } from "./legacy/lessons.js";
+import { CAREER_STAGES } from "./curriculum/ids.js";
+import { PARADIGM_MAP, PRACTICE_CARD_MAP } from "./curriculum/index.js";
+import { DRILL_MODES as PRACTICE_MODES, DRILL_PHASES as PRACTICE_PHASES, DRILL_STATUSES as PRACTICE_STATUSES } from "./arena/engine.js";
+import {
+  LESSON_PHASES as NEW_LESSON_PHASES,
+  LESSON_STATUSES as NEW_LESSON_STATUSES,
+  LESSON_TAKES as NEW_LESSON_TAKES,
+  checkKeys as lessonCheckKeys,
+} from "./arena/lesson-engine.js";
 
 const DB_NAME = "speak-clearly-local";
 // v2 新增 drills（实战回合）对象仓库
@@ -19,7 +36,6 @@ const MAX_SESSIONS = 10_000;
 const MAX_DRILLS = 10_000;
 const MAX_DRILL_NOTES = 12;
 const MAX_LESSON_RUNS = 2_000;
-const HOME_TRACKS = ["learn", "practice"];
 const MAX_SOURCES = 20;
 const MAX_STRING_LENGTH = 4_000;
 const CARD_MAP = new Map(TASK_CARDS.map((card) => [card.id, card]));
@@ -31,7 +47,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   reducedMotion: false,
   keepRecordings: true,
   onboardingComplete: false,
-  homeTrack: "learn",
+  careerStage: "phd",
 });
 
 let databasePromise;
@@ -303,11 +319,12 @@ function normalizeSettings(value, { allowPartial = false } = {}) {
     }
     settings.defaultMode = value.defaultMode;
   }
-  if (value.homeTrack != null) {
-    if (!HOME_TRACKS.includes(value.homeTrack)) {
-      throw new Error("导入文件中的首页模式无效");
+  // homeTrack 是旧版首页模式，已废弃：读到任何值都直接丢弃
+  if (value.careerStage != null) {
+    if (!CAREER_STAGES.includes(value.careerStage)) {
+      throw new Error("导入文件中的当前阶段无效");
     }
-    settings.homeTrack = value.homeTrack;
+    settings.careerStage = value.careerStage;
   }
   for (const key of ["soundEnabled", "reducedMotion", "keepRecordings", "onboardingComplete"]) {
     settings[key] = booleanValue(value[key], key, settings[key]);
@@ -623,16 +640,13 @@ function normalizeDrillNotes(value) {
 }
 
 /**
- * 规范化实战回合记录；卡片元数据以当前题库为准重新派生，避免导入数据伪造。
+ * 规范化旧版（schemaVersion 1）实战回合记录；卡片元数据以冻结的旧题库为准重新派生，避免导入数据伪造。
  *
  * @param {object} raw 原始记录
  * @param {{ stripRecordings?: boolean }} options 导入/导出时剥离录音引用
  * @returns {object} 规范化后的回合
  */
-function normalizeDrill(raw, { stripRecordings = false } = {}) {
-  if (!isPlainObject(raw)) {
-    throw new Error("导入文件中的实战回合无效");
-  }
+function normalizeLegacyDrill(raw, { stripRecordings = false } = {}) {
   const cardId = identifier(raw.cardId, "实战卡 ID");
   const card = ARENA_CARD_MAP.get(cardId);
   if (!card) {
@@ -675,12 +689,9 @@ function normalizeDrill(raw, { stripRecordings = false } = {}) {
 }
 
 /**
- * 规范化学习模式的一次课程记录；示范卡与迁移卡必须属于这一课的场景。
+ * 规范化旧版（schemaVersion 1）课程记录；示范卡与迁移卡必须属于这一课的场景。
  */
-function normalizeLessonRun(raw, { stripRecordings = false } = {}) {
-  if (!isPlainObject(raw)) {
-    throw new Error("导入文件中的学习记录无效");
-  }
+function normalizeLegacyLessonRun(raw, { stripRecordings = false } = {}) {
   const scenarioId = identifier(raw.scenarioId, "课程场景");
   if (!LESSON_MAP.has(scenarioId)) {
     throw new Error(`导入文件引用了不存在的课程：${scenarioId}`);
@@ -715,6 +726,120 @@ function normalizeLessonRun(raw, { stripRecordings = false } = {}) {
   return run;
 }
 
+/**
+ * 规范化新版练习回合；题卡元数据以当前课程体系为准重新派生，避免导入数据伪造。
+ *
+ * @param {object} raw 原始记录
+ * @param {{ stripRecordings?: boolean }} options 导入/导出时剥离录音引用
+ * @returns {object} 规范化后的回合
+ */
+function normalizePracticeDrill(raw, { stripRecordings = false } = {}) {
+  const cardId = identifier(raw.cardId, "题卡 ID");
+  const card = PRACTICE_CARD_MAP.get(cardId);
+  if (!card) {
+    throw new Error(`导入文件引用了不存在的题卡：${cardId}`);
+  }
+  const status = oneOf(raw.status, PRACTICE_STATUSES, "回合状态");
+  return {
+    drillId: identifier(raw.drillId, "回合 ID"),
+    schemaVersion: 2,
+    cardId,
+    cardVersion: text(raw.cardVersion, "题卡版本", { max: 40 }) || card.version,
+    contextId: card.contextId,
+    paradigmId: card.paradigmId,
+    line: card.line,
+    industryId: card.industryId ?? null,
+    title: card.title,
+    mode: oneOf(raw.mode, PRACTICE_MODES, "回合模式"),
+    status,
+    phase: oneOf(raw.phase, PRACTICE_PHASES, "回合阶段"),
+    phaseStartedAt: raw.phaseStartedAt == null ? null : finiteNumber(raw.phaseStartedAt, "阶段开始时间", { min: 0 }),
+    startedAt: isoDate(raw.startedAt, "回合开始时间", { required: true }),
+    completedAt: isoDate(raw.completedAt, "回合完成时间", { required: status !== "in_progress" }),
+    selectionReason: text(raw.selectionReason, "选题原因", { max: 200 }),
+    revisitOf: raw.revisitOf == null ? null : identifier(raw.revisitOf, "复练来源 ID"),
+    interruptId: oneOf(raw.interruptId, card.interrupts, "打断事件"),
+    interruptAt: finiteNumber(raw.interruptAt, "打断时间", { min: 0, max: 3_600, integer: true }),
+    followupId: oneOf(raw.followupId, card.followups, "追问事件"),
+    takes: {
+      first: normalizeDrillTake(raw.takes?.first, "首次表达", stripRecordings),
+      second: normalizeDrillTake(raw.takes?.second, "重讲", stripRecordings),
+    },
+    checks: {
+      first: normalizeDrillChecks(raw.checks?.first, "首次检查", card.checks),
+      second: normalizeDrillChecks(raw.checks?.second, "重讲检查", card.checks),
+    },
+    focusCheckId: raw.focusCheckId == null ? null : oneOf(raw.focusCheckId, card.checks, "重讲目标"),
+    notes: normalizeDrillNotes(raw.notes),
+    lesson: text(raw.lesson, "带走的一句话", { max: 500 }),
+  };
+}
+
+/**
+ * 回合规范化入口：只按 schemaVersion 分流（2 为新版，其余按旧版），不看 ID，因为新旧 ID 可能重名。
+ *
+ * @param {object} raw 原始记录
+ * @param {{ stripRecordings?: boolean }} options 导入/导出时剥离录音引用
+ * @returns {object} 规范化后的回合
+ */
+function normalizeDrill(raw, options = {}) {
+  if (!isPlainObject(raw)) {
+    throw new Error("导入文件中的实战回合无效");
+  }
+  return raw.schemaVersion === 2 ? normalizePracticeDrill(raw, options) : normalizeLegacyDrill(raw, options);
+}
+
+// 表达槽位对应的检查阶段
+const LESSON_SLOT_CHECK_PHASE = Object.freeze({ retell1: "check1", retell2: "check2", transfer: "check3" });
+
+/** 规范化新版课程记录；迁移题卡必须属于本课且在本课的迁移语境中。 */
+function normalizeParadigmLessonRun(raw, { stripRecordings = false } = {}) {
+  const paradigmId = identifier(raw.paradigmId, "课程");
+  const paradigm = PARADIGM_MAP.get(paradigmId);
+  if (!paradigm) {
+    throw new Error(`导入文件引用了不存在的课程：${paradigmId}`);
+  }
+  const transfer = PRACTICE_CARD_MAP.get(identifier(raw.transferCardId, "迁移题卡"));
+  if (!transfer || transfer.paradigmId !== paradigmId || !paradigm.transferContextIds.includes(transfer.contextId)) {
+    throw new Error("导入文件中的迁移题卡无效");
+  }
+  const status = oneOf(raw.status, NEW_LESSON_STATUSES, "学习状态");
+  const run = {
+    runId: identifier(raw.runId, "学习记录 ID"),
+    schemaVersion: 2,
+    paradigmId,
+    transferCardId: transfer.id,
+    phase: oneOf(raw.phase, NEW_LESSON_PHASES, "学习阶段"),
+    status,
+    phaseStartedAt: raw.phaseStartedAt == null ? null : finiteNumber(raw.phaseStartedAt, "阶段开始时间", { min: 0 }),
+    startedAt: isoDate(raw.startedAt, "学习开始时间", { required: true }),
+    completedAt: isoDate(raw.completedAt, "学习完成时间", { required: status !== "in_progress" }),
+    takes: {},
+    checks: {},
+    lesson: text(raw.lesson, "带走的一句话", { max: 500 }),
+  };
+  // 每个表达槽位只允许对应检查阶段的键：复述只含范式步骤，迁移再加迁移题卡的关键行为
+  for (const slot of NEW_LESSON_TAKES) {
+    run.takes[slot] = normalizeDrillTake(raw.takes?.[slot], "学习表达", stripRecordings);
+    run.checks[slot] = normalizeDrillChecks(raw.checks?.[slot], "学习检查", lessonCheckKeys(run, LESSON_SLOT_CHECK_PHASE[slot]));
+  }
+  return run;
+}
+
+/**
+ * 课程记录规范化入口：只按 schemaVersion 分流。旧课程 ID（如 bad_news）与新课程同名，不能按 ID 判断。
+ *
+ * @param {object} raw 原始记录
+ * @param {{ stripRecordings?: boolean }} options 导入/导出时剥离录音引用
+ * @returns {object} 规范化后的课程记录
+ */
+function normalizeLessonRun(raw, options = {}) {
+  if (!isPlainObject(raw)) {
+    throw new Error("导入文件中的学习记录无效");
+  }
+  return raw.schemaVersion === 2 ? normalizeParadigmLessonRun(raw, options) : normalizeLegacyLessonRun(raw, options);
+}
+
 function normalizeStoredLessonRun(raw) {
   try {
     return normalizeLessonRun(raw);
@@ -740,7 +865,7 @@ function normalizeStoredSession(raw, active = false) {
 }
 
 function normalizeImportDocument(data) {
-  if (!isPlainObject(data) || data.format !== "speak-clearly-export" || data.version !== 1 || !Array.isArray(data.sessions)) {
+  if (!isPlainObject(data) || data.format !== "speak-clearly-export" || (data.version !== 1 && data.version !== 2) || !Array.isArray(data.sessions)) {
     throw new Error("这不是受支持的讲明白数据文件");
   }
   if (data.sessions.length > MAX_SESSIONS) {
@@ -933,6 +1058,8 @@ async function commitImport(snapshot, data) {
   const activeSession = data.activeSession
     ? preserveLocalRecordingReferences(existingActive, data.activeSession)
     : null;
+  // 导入文件的收藏仅在非空时写入；v2 导出不含收藏，不能因此清空本机收藏
+  const shouldWriteFavorites = Array.isArray(data.favorites) && data.favorites.length > 0;
   if (snapshot.backend === "fallback") {
     const current = fallbackRead();
     fallbackWrite({
@@ -940,7 +1067,7 @@ async function commitImport(snapshot, data) {
       settings: data.settings,
       sessions,
       activeSession,
-      favorites: data.favorites,
+      ...(shouldWriteFavorites ? { favorites: data.favorites } : {}),
       drills,
       lessonRuns,
     });
@@ -960,7 +1087,9 @@ async function commitImport(snapshot, data) {
       sessionStore.put(session);
     }
     kv.put(data.settings, "settings");
-    kv.put(data.favorites, "favorites");
+    if (shouldWriteFavorites) {
+      kv.put(data.favorites, "favorites");
+    }
     kv.put(lessonRuns, "lessonRuns");
     kv.put(activeSession, "activeSession");
   });
@@ -1298,30 +1427,65 @@ function sanitizeSessionForExport(session) {
   return copy;
 }
 
+/**
+ * 导出本地数据（格式 version 2）：不再包含收藏与进行中的主题训练（后者在启动时已被归档）。
+ *
+ * @returns {Promise<object>} 可直接序列化为 JSON 的导出文档
+ */
 export async function exportLocalData() {
-  const [settings, sessions, activeSession, favorites, drills, lessonRuns] = await Promise.all([
+  const [settings, sessions, drills, lessonRuns] = await Promise.all([
     loadSettings(),
     loadSessions(),
-    loadActiveSession(),
-    loadFavorites(),
     loadDrills(),
     loadLessonRuns(),
   ]);
-  const activeHasRecording = Boolean(activeSession?.recordingFirstId || activeSession?.recordingRetryId);
   return {
     format: "speak-clearly-export",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
-    note: activeHasRecording
-      ? "录音文件和含录音引用的进行中进度因体积和隐私原因未包含在 JSON 导出中；已完成记录保留文字数据。"
-      : "录音文件因体积和隐私原因未包含在 JSON 导出中。",
+    note: "录音文件因体积和隐私原因未包含在 JSON 导出中。",
     settings,
     sessions: sessions.map(sanitizeSessionForExport),
-    activeSession: activeHasRecording ? null : sanitizeSessionForExport(activeSession),
-    favorites: [...favorites],
     drills: drills.map((drill) => normalizeDrill(drill, { stripRecordings: true })),
     lessonRuns: lessonRuns.map((run) => normalizeLessonRun(run, { stripRecordings: true })),
   };
+}
+
+/**
+ * 升级后首次加载时，把进行中的旧版训练归档为“未完成”，避免旧流程卡在首页。
+ *
+ * 处理三类：进行中的主题训练、schemaVersion 不为 2 的进行中回合、schemaVersion 不为 2 的进行中课程。
+ * 界面在启动时与导入完成后各调用一次；重复调用不会重复归档。
+ *
+ * @returns {Promise<number>} 归档的条数，供界面提示一次
+ */
+export async function archiveLegacyInProgress() {
+  const now = new Date().toISOString();
+  let archived = 0;
+  const session = await loadActiveSession();
+  if (session && session.completionStatus === "in_progress") {
+    // 与旧版“放弃训练”一致：写入完成时间与原因，删除录音，清空进行中进度
+    await archiveSessionWithoutRecordings(
+      { ...session, completionStatus: "abandoned", completedAt: now, skipReason: "升级到成长路线版本后自动归档" },
+      { clearActive: true, retention: "discarded_incomplete" },
+    );
+    archived += 1;
+  }
+  // 注意：下面“写入历史 + 清空进行中”是两次独立写入，非原子；
+  // 若中途中断，进行中记录会变成非 in_progress 状态，界面把这种记录视为空，因此不会卡住流程。
+  const drill = await getKey("activeDrill", null);
+  if (drill && drill.schemaVersion !== 2 && drill.status === "in_progress") {
+    await saveDrillProgress({ ...drill, status: "abandoned", completedAt: now });
+    await saveDrillProgress(null);
+    archived += 1;
+  }
+  const lesson = await getKey("activeLesson", null);
+  if (lesson && lesson.schemaVersion !== 2 && lesson.status === "in_progress") {
+    await saveLessonProgress({ ...lesson, status: "abandoned", completedAt: now });
+    await saveLessonProgress(null);
+    archived += 1;
+  }
+  return archived;
 }
 
 export async function importLocalData(data) {
@@ -1370,5 +1534,6 @@ export const __storageTestables = Object.freeze({
   normalizeImportDocument,
   normalizeLessonRun,
   normalizeSession,
+  normalizeSettings,
   sanitizeSessionForExport,
 });

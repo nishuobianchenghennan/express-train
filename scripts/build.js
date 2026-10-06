@@ -1,15 +1,17 @@
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { TASK_CARDS } from "../public/js/data/cards.js";
+import { curriculumErrors } from "../public/js/curriculum/index.js";
 
 const root = path.resolve(import.meta.dirname, "..");
 const publicRoot = path.join(root, "public");
 const distRoot = path.join(root, "dist");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 
-if (TASK_CARDS.length !== 365 || new Set(TASK_CARDS.map((card) => card.id)).size !== 365) {
-  throw new Error("Task card bank must contain 365 unique cards");
+// 构建前以完整模式校验课程体系：30 课、56 类语境、题量与迁移题卡都必须写全
+const curriculumProblems = curriculumErrors({ complete: true });
+if (curriculumProblems.length) {
+  throw new Error(`Curriculum is incomplete:\n${curriculumProblems.join("\n")}`);
 }
 
 function assetPathForPrecache(value) {
@@ -35,7 +37,8 @@ async function validateModuleGraph(moduleUrl, visited = new Set()) {
   visited.add(moduleUrl);
   const modulePath = assetPathForPrecache(moduleUrl);
   const source = await readFile(modulePath, "utf8");
-  for (const match of source.matchAll(/(?:import\s+(?:[^"']+from\s+)?|import\s*\()\s*["']([^"']+)["']/g)) {
+  // 同时匹配 import、动态 import() 与 export … from 再导出，避免再导出的模块漏出离线缓存
+  for (const match of source.matchAll(/(?:(?:import|export)\s+(?:[^"';]+from\s+)?|import\s*\()\s*["']([^"']+)["']/g)) {
     const dependency = match[1];
     if (!dependency.startsWith(".")) {
       continue;

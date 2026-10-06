@@ -1,53 +1,31 @@
-import { CARD_BANK_VERSION, DOMAINS, METRICS, PROTOCOLS, SCENES, STRUCTURES, TASK_CARDS, TASK_TYPES } from "./data/cards.js";
+import { DOMAINS, METRICS, PROTOCOLS, SCENES, STRUCTURES, TASK_CARDS, TASK_TYPES } from "./legacy/cards.js";
 import { icon } from "./icons.js";
+import { calculateStats, filterHistory } from "./legacy/stats.js";
+import { legacyCheckRates, legacyDrillOutcome } from "./legacy/engines.js";
+import { LESSON_MAP as LEGACY_LESSON_MAP } from "./legacy/lessons.js";
+import { CHECKS as LEGACY_CHECKS } from "./legacy/scenarios.js";
+import { CHECKS } from "./curriculum/checks.js";
+import { CAREER_STAGES } from "./curriculum/ids.js";
+import { LINES, LINE_WEIGHTS } from "./curriculum/contexts.js";
+import { PARADIGM_MAP, PRACTICE_CARDS, PRACTICE_CARD_MAP } from "./curriculum/index.js";
+import { drawSequence, dueRevisits, practiceStats, revisitSelection, selectPracticeCard, weaknessLabel } from "./arena/engine.js";
+import { applyRateBars, createArenaController, estimateDrillMinutes, renderDrillHistory, renderPracticeAbility } from "./arena/ui.js";
+import { learnedParadigms, recentlyLearned, recommendedLesson } from "./arena/lesson-engine.js";
+import { createLessonController, renderCurriculumMap } from "./arena/lesson-ui.js";
 import {
-  annualPlanAlternative,
-  annualPlanEntryForDate,
-  createAnnualPlan,
-  createDrawSequence,
-  selectTask,
-} from "./core/selection.js";
-import {
-  advanceStage,
-  buildRuleFeedback,
-  createSession,
-  currentElapsed,
-  extendTimer,
-  orderedStages,
-  stageLabel,
-  startTraining,
-  timerRemaining,
-  toggleTimer,
-  totalEstimatedMinutes,
-  validateStage,
-} from "./core/session.js";
-import { calculateStats, filterHistory } from "./core/stats.js";
-import { ARENA_CARD_MAP, ARENA_CARDS, CHECKS, FAMILIES } from "./arena/scenarios.js";
-import { arenaStats, selectArenaCard } from "./arena/engine.js";
-import { applyRateBars, createArenaController, estimateDrillMinutes, renderArenaAbility, renderDrillHistory } from "./arena/ui.js";
-import { learnedScenarios } from "./arena/lesson-engine.js";
-import { createLessonController, renderLearnHome } from "./arena/lesson-ui.js";
-import {
-  archiveSessionWithoutRecordings,
-  clearActiveSession,
+  archiveLegacyInProgress,
   clearAllData,
   DEFAULT_SETTINGS,
   exportLocalData,
   importLocalData,
   loadActiveDrill,
   loadActiveLesson,
-  loadActiveSession,
   loadDrills,
   loadLessonRuns,
-  loadFavorites,
   loadRecording,
   loadSessions,
   loadSettings,
-  replaceActiveSessionRecording,
-  saveActiveSession as writeActiveSession,
-  saveCompletedSession,
   saveDrillProgress,
-  saveFavorites,
   saveLessonProgress,
   saveRecording,
   saveSettings,
@@ -56,27 +34,31 @@ import {
 
 const root = document.querySelector("#app");
 const cardMap = new Map(TASK_CARDS.map((card) => [card.id, card]));
-const validViews = new Set(["home", "library", "history", "ability", "settings", "train", "drill", "lesson"]);
+const validViews = new Set(["home", "lessons", "history", "ability", "settings", "drill", "lesson"]);
 const validCompletionStatuses = new Set(["completed", "skipped", "abandoned"]);
-const generalMetricIds = Object.entries(METRICS)
-  .filter(([, metric]) => metric.general)
-  .map(([id]) => id);
-const ANNUAL_PLAN_SEED = 42;
 const TOPIC_DRAW_DURATION_MS = 5_000;
+const BUSY_NAVIGATION_MESSAGE = "正在表达中，请先点“讲完了”。";
+/** “当前阶段”设置的文案：决定四条线的出题比例。 */
+const CAREER_STAGE_NAMES = Object.freeze({ phd: "博士在读", bridge: "准备转化", founder: "已创业" });
+/**
+ * 按 LINE_WEIGHTS 生成出题比例提示，避免文案与权重配置脱节。
+ * 线名取前两个字作简称（学术线 → 学术、生活社交线 → 生活）。
+ */
+function stageWeightHint(stageId) {
+  return Object.entries(LINE_WEIGHTS[stageId] ?? {})
+    .map(([lineId, weight]) => `${(LINES[lineId]?.label ?? lineId).slice(0, 2)} ${weight}%`)
+    .join(" · ");
+}
+const CAREER_STAGE_LABELS = Object.freeze(Object.fromEntries(
+  Object.entries(CAREER_STAGE_NAMES).map(([id, label]) => [id, Object.freeze({ label, hint: stageWeightHint(id) })]),
+));
 // 单张候选卡宽度 220px + 间距 12px，轮播位移按此步长计算
 const TOPIC_CARD_STRIDE_PX = 232;
 const TOPIC_IDLE_LOOP_MS = 30_000;
 // 抽题减速曲线：前段快速掠过，末段缓慢停靠到中奖卡
 const TOPIC_DRAW_EASING = "cubic-bezier(0.15, 0.55, 0.1, 1)";
-const annualPlanCache = new Map();
-const sensitiveFlagLabels = Object.freeze({
-  finance: "财务与金钱",
-  health: "健康信息",
-  mental_health: "情绪与心理支持",
-});
 const exclusiveActions = new Set([
   "setting-mode",
-  "onboarding-mode",
   "start-home",
   "explore-topics",
   "drill-start-prep",
@@ -90,18 +72,9 @@ const exclusiveActions = new Set([
   "lesson-close",
   "lesson-next",
   "lesson-practice",
-  "home-track",
-  "start-training",
-  "skip-sensitive-task",
-  "confirm-swap",
-  "confirm-abandon",
-  "advance-stage",
-  "start-recording",
-  "finish-session",
-  "close-complete",
-  "toggle-favorite",
-  "start-card",
-  "start-focus",
+  "start-revisit",
+  "setting-stage",
+  "onboarding-stage",
   "export-data",
   "install-app",
   "confirm-clear-data",
@@ -111,17 +84,13 @@ const exclusiveActions = new Set([
 const state = {
   settings: { ...DEFAULT_SETTINGS },
   sessions: [],
-  favorites: new Set(),
-  activeSession: null,
   view: "home",
   homeMode: "full",
-  homeScene: "",
   topicDraw: null,
   activeDrill: null,
   drills: [],
   activeLesson: null,
   lessonRuns: [],
-  libraryFilters: { query: "", scene: "", domain: "", difficulty: "", favorites: "" },
   historyFilters: {
     query: "",
     scene: "",
@@ -140,21 +109,14 @@ const state = {
   pendingFocus: null,
   pendingAnnouncement: "",
   installPrompt: null,
-  recordingRuntime: null,
   audioUrls: [],
   renderVersion: 0,
-  saveStatus: "saved",
 };
 
-let saveTimer;
-let pendingActiveSave = null;
-let activeSaveTail = Promise.resolve();
-let saveRevision = 0;
 let actionInFlight = false;
 let topicDrawRevision = 0;
 // 空闲轮播的共享时间原点，保证重渲染后从当前位置续播而不是回到起点
 const topicIdleEpoch = performance.now();
-let clockTimer;
 let toastTimer;
 const arena = createArenaController({
   root,
@@ -183,7 +145,7 @@ const lessons = createLessonController({
   saveRecording,
   loadRecording,
   saveLessonProgress,
-  onPracticeScenario: (scenarioId) => void practiceScenario(scenarioId).catch((error) => showToast(error?.message || "无法开始实践，请重试。", "danger")),
+  onPracticeParadigm: (paradigmId) => void practiceParadigm(paradigmId).catch((error) => showToast(error?.message || "无法开始练习，请重试。", "danger")),
 });
 
 function escapeHtml(value = "") {
@@ -224,38 +186,6 @@ function dateKey(value) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-function annualPlanForDate(value = new Date()) {
-  const year = Number(dateKey(value).slice(0, 4));
-  if (!Number.isInteger(year)) {
-    throw new Error("年度计划日期无效");
-  }
-  if (!annualPlanCache.has(year)) {
-    annualPlanCache.set(year, createAnnualPlan(TASK_CARDS, { year, seed: ANNUAL_PLAN_SEED }));
-  }
-  return annualPlanCache.get(year);
-}
-
-function annualEntryForDate(value = new Date()) {
-  return annualPlanEntryForDate(annualPlanForDate(value), value);
-}
-
-function cardIsSensitive(card) {
-  return Boolean(card?.sensitiveFlags?.length);
-}
-
-function sensitiveFlagText(card) {
-  return (card?.sensitiveFlags ?? [])
-    .map((flag) => sensitiveFlagLabels[flag] ?? flag)
-    .join("、");
-}
-
-function formatDuration(seconds = 0) {
-  const absolute = Math.max(0, Math.round(Math.abs(seconds)));
-  const minutes = Math.floor(absolute / 60);
-  const remainder = absolute % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
-}
-
 function formatBytes(bytes = 0) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -264,10 +194,6 @@ function formatBytes(bytes = 0) {
     return `${(bytes / 1024).toFixed(1)} KB`;
   }
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function plural(value, unit) {
-  return `${value} ${unit}`;
 }
 
 function selected(value, expected) {
@@ -284,74 +210,6 @@ function safeToken(value, registry) {
 
 function safeCompletionStatus(value) {
   return validCompletionStatuses.has(value) ? value : "abandoned";
-}
-
-function saveStateMarkup() {
-  if (state.saveStatus === "saving") {
-    return `${icon("clock")}正在保存`;
-  }
-  if (state.saveStatus === "error") {
-    return `${icon("alert")}保存失败`;
-  }
-  return `${icon("check")}进度已保存`;
-}
-
-function setSaveStatus(status) {
-  state.saveStatus = status;
-  const indicator = root.querySelector(".save-state");
-  if (indicator) {
-    indicator.classList.toggle("is-error", status === "error");
-    indicator.innerHTML = saveStateMarkup();
-  }
-}
-
-function queueActiveSave(session, { reportFailure = false } = {}) {
-  const snapshot = structuredClone(session);
-  const revision = ++saveRevision;
-  setSaveStatus("saving");
-  const operation = activeSaveTail.then(() => writeActiveSession(snapshot));
-  activeSaveTail = operation.catch(() => {});
-  operation.then(
-    () => {
-      if (revision === saveRevision) {
-        setSaveStatus("saved");
-      }
-    },
-    () => {
-      if (revision === saveRevision) {
-        setSaveStatus("error");
-      }
-      if (reportFailure) {
-        showToast("本地进度保存失败，请先不要关闭页面。", "danger");
-      }
-    },
-  );
-  return operation;
-}
-
-function cancelScheduledActiveSave() {
-  clearTimeout(saveTimer);
-  saveTimer = null;
-  pendingActiveSave = null;
-}
-
-function flushScheduledActiveSave(options = {}) {
-  clearTimeout(saveTimer);
-  saveTimer = null;
-  const pending = pendingActiveSave;
-  pendingActiveSave = null;
-  if (pending) {
-    return queueActiveSave(pending, options);
-  }
-  if (state.activeSession && state.saveStatus === "error") {
-    return queueActiveSave(state.activeSession, options);
-  }
-  return activeSaveTail;
-}
-
-function saveActiveNow(session) {
-  cancelScheduledActiveSave();
-  return queueActiveSave(session);
 }
 
 function describeControl(element) {
@@ -396,44 +254,12 @@ function focusMainContent() {
   main?.focus({ preventScroll: true });
 }
 
-function recordingBusy() {
-  return Boolean(state.recordingRuntime);
-}
-
-function cardForSession(session = state.activeSession) {
-  return session ? cardMap.get(session.taskCardId) : null;
-}
-
 function sessionTimestamp(session) {
   return new Date(session.completedAt ?? session.startedAt ?? 0).getTime();
 }
 
 function applySettings() {
   document.documentElement.classList.toggle("reduce-motion", state.settings.reducedMotion);
-}
-
-function scheduleActiveSave() {
-  clearTimeout(saveTimer);
-  pendingActiveSave = state.activeSession ? structuredClone(state.activeSession) : null;
-  setSaveStatus("saving");
-  saveTimer = setTimeout(() => {
-    void flushScheduledActiveSave({ reportFailure: true }).catch(() => {});
-  }, 180);
-}
-
-function updateActive(updater, options = {}) {
-  if (!state.activeSession) {
-    return;
-  }
-  const next = typeof updater === "function" ? updater(state.activeSession) : updater;
-  state.activeSession = {
-    ...next,
-    notesUpdatedAt: options.markNotes ? new Date().toISOString() : next.notesUpdatedAt,
-  };
-  scheduleActiveSave();
-  if (options.render) {
-    render();
-  }
 }
 
 function showToast(message, tone = "default") {
@@ -453,11 +279,7 @@ function showToast(message, tone = "default") {
 
 function navigate(view) {
   if (arena.isBusy() || lessons.isBusy()) {
-    showToast("正在表达中，请先点“讲完了”。", "danger");
-    return;
-  }
-  if (recordingBusy()) {
-    showToast(state.recordingRuntime?.status === "saving" ? "录音仍在保存，请稍候。" : "请先停止当前录音。", "danger");
+    showToast(BUSY_NAVIGATION_MESSAGE, "danger");
     return;
   }
   const next = validViews.has(view) ? view : "home";
@@ -471,22 +293,23 @@ function navigate(view) {
 }
 
 function navItem(view, label, iconName) {
-  const active = state.view === view || (view === "home" && ["train", "drill", "lesson"].includes(state.view));
+  // 练习工作台归属“今日训练”，课程工作台归属“30 课”
+  const active = state.view === view || (view === "home" && state.view === "drill") || (view === "lessons" && state.view === "lesson");
   return `<button class="nav-item${active ? " is-active" : ""}" type="button" data-action="navigate" data-view="${view}" aria-current="${active ? "page" : "false"}">${icon(iconName)}<span>${label}</span></button>`;
 }
 
 function renderShell(content, options = {}) {
-  const training = ["train", "drill", "lesson"].includes(state.view);
+  const training = ["drill", "lesson"].includes(state.view);
   return `
     <div class="app-shell${training ? " is-training" : ""}">
       <aside class="sidebar" aria-label="主要导航">
         <button class="brand" type="button" data-action="navigate" data-view="home" aria-label="讲明白首页">
           <img src="/icons/icon.svg" alt="" width="38" height="38">
-          <span><strong>讲明白</strong><small>表达结构与实战训练</small></span>
+          <span><strong>讲明白</strong><small>30 种表达结构与练习</small></span>
         </button>
         <nav class="sidebar-nav">
           ${navItem("home", "今日训练", "home")}
-          ${navItem("library", "主题题库", "library")}
+          ${navItem("lessons", "30 课", "book")}
           ${navItem("history", "训练历史", "history")}
           ${navItem("ability", "能力档案", "chart")}
         </nav>
@@ -505,48 +328,11 @@ function renderShell(content, options = {}) {
         </header>
         <main id="main-content" class="main-content${training ? " training-content" : ""}" tabindex="-1">${content}</main>
       </div>
-      ${training ? "" : `<nav class="bottom-nav" aria-label="移动端导航">${navItem("home", "训练", "home")}${navItem("library", "题库", "library")}${navItem("history", "历史", "history")}${navItem("ability", "能力", "chart")}${navItem("settings", "设置", "settings")}</nav>`}
+      ${training ? "" : `<nav class="bottom-nav" aria-label="移动端导航">${navItem("home", "训练", "home")}${navItem("lessons", "30 课", "book")}${navItem("history", "历史", "history")}${navItem("ability", "能力", "chart")}${navItem("settings", "设置", "settings")}</nav>`}
     </div>
     ${renderModal()}
     ${!state.settings.onboardingComplete && !state.modal ? renderOnboarding() : ""}
   `;
-}
-
-function metricScore(session, id, phase = "first") {
-  const source = phase === "retry" ? session.retryScores : session.selfScores;
-  return source?.[id];
-}
-
-function renderScoreScale(metricId, session, phase) {
-  const current = metricScore(session, metricId, phase);
-  return `<div class="score-scale" role="radiogroup" aria-label="${escapeHtml(METRICS[metricId].label)}评分">
-    ${[1, 2, 3, 4, 5]
-      .map(
-        (score) => `<label class="score-choice${current === score ? " is-selected" : ""}">
-          <input type="radio" name="${phase}-${metricId}" value="${score}" aria-label="${escapeHtml(METRICS[metricId].label)} ${score} 分" data-score-phase="${phase}" data-metric-id="${metricId}"${checked(current === score)}>
-          <span>${score}</span>
-        </label>`,
-      )
-      .join("")}
-  </div>`;
-}
-
-function renderMetricRows(session, card, phase) {
-  const sceneMetricIds = card.reviewMetricIds.filter((id) => !generalMetricIds.includes(id));
-  const group = (title, ids) => `<section class="score-group">
-    <div class="score-group-head"><h3>${title}</h3><span>1 需要纠正 · 5 表现稳定</span></div>
-    <div class="score-list">
-      ${ids
-        .map(
-          (id) => `<div class="score-row">
-            <div><strong>${escapeHtml(METRICS[id].label)}</strong><small>${escapeHtml(METRICS[id].description)}</small></div>
-            ${renderScoreScale(id, session, phase)}
-          </div>`,
-        )
-        .join("")}
-    </div>
-  </section>`;
-  return group("通用观察", generalMetricIds) + group(`${card.sceneLabel}专项观察`, sceneMetricIds);
 }
 
 function renderModeSelector(value, actionPrefix = "home-mode") {
@@ -556,22 +342,6 @@ function renderModeSelector(value, actionPrefix = "home-mode") {
   </div>`;
 }
 
-function renderFamilySelect(value) {
-  return `<label class="field compact-field"><span>场景范围</span><select name="homeScene"><option value="">自适应（弱项 + 新行业 + 复练）</option>${Object.entries(FAMILIES)
-    .map(([id, family]) => `<option value="${id}"${selected(value, id)}>${escapeHtml(family.label)}</option>`)
-    .join("")}</select></label>`;
-}
-
-function sceneCoverage(counts, days, compact = false) {
-  const maximum = Math.max(1, ...Object.values(counts));
-  return `<div class="coverage-list${compact ? " compact" : ""}">${Object.entries(SCENES)
-    .map(([id, scene]) => {
-      const value = counts[id] ?? 0;
-      return `<div class="coverage-row"><span>${escapeHtml(scene.label)}</span><progress value="${value}" max="${maximum}" aria-label="${escapeHtml(scene.label)} ${days} 天训练 ${value} 次"></progress><strong>${value}</strong></div>`;
-    })
-    .join("")}</div>`;
-}
-
 function resetTopicDraw() {
   topicDrawRevision += 1;
   state.topicDraw = null;
@@ -579,41 +349,41 @@ function resetTopicDraw() {
 
 function currentTopicDraw() {
   const draw = state.topicDraw;
-  return draw && draw.scene === state.homeScene && draw.mode === state.homeMode ? draw : null;
+  return draw && draw.mode === state.homeMode ? draw : null;
 }
 
-/** 空闲轮播：按固定步长跨场景、跨行业取 8 张实战卡，展示题库的广度。 */
-function idleTopicCards(family) {
-  const pool = ARENA_CARDS.filter((card) => card.status === "active" && (!family || card.family === family));
+/** 空闲轮播：按固定步长从精选题中取 8 张，展示四条线与各类语境的广度。 */
+function idleTopicCards() {
+  const pool = PRACTICE_CARDS.filter((card) => card.status === "active");
   const step = Math.max(1, Math.floor(pool.length / 8) + 1);
   return Array.from({ length: Math.min(8, pool.length) }, (_, index) => pool[(index * step) % pool.length]);
 }
 
 function renderTopicDraw(draw) {
-  const idleBase = idleTopicCards(state.homeScene);
-  const cards = draw ? draw.cardIds.map((id) => ARENA_CARD_MAP.get(id)).filter(Boolean) : [...idleBase, ...idleBase];
+  const idleBase = idleTopicCards();
+  const cards = draw ? draw.cardIds.map((id) => PRACTICE_CARD_MAP.get(id)).filter(Boolean) : [...idleBase, ...idleBase];
   const winnerIndex = draw?.winnerIndex ?? -1;
   const offset = winnerIndex > 0 ? winnerIndex * TOPIC_CARD_STRIDE_PX : 0;
   const idleOffset = idleBase.length * TOPIC_CARD_STRIDE_PX;
   const status = draw?.status ?? "idle";
-  const scopeLabel = state.homeScene ? FAMILIES[state.homeScene]?.label ?? "指定场景" : "自适应";
   const statusText = status === "spinning"
-    ? "正在按弱项、行业覆盖和复练计划选择"
+    ? "正在按阶段比例、弱项和复练计划选择"
     : status === "settled"
-      ? "已选出一个实战场景"
-      : `${ARENA_CARDS.length} 个真实场景 · ${Object.keys(FAMILIES).length} 类情境 · 18 个行业`;
+      ? "已选出一道练习题"
+      : `${PRACTICE_CARDS.length} 道精选题 · 4 条线 · 56 类语境`;
   const stage = status === "spinning" ? 2 : status === "settled" ? 3 : 1;
+  const winner = draw?.winnerId ? PRACTICE_CARD_MAP.get(draw.winnerId) : null;
   return `<section class="topic-draw topic-draw-${status}" aria-label="本轮话题抽取">
-    <div class="topic-draw-heading"><div><p class="eyebrow">本回合入口</p><h3>抽一个真实场景，直接开口</h3><p>${escapeHtml(scopeLabel)} · 约 5 秒完成选择</p></div><span class="draw-step-count">${stage}<small>/ 3</small></span></div>
+    <div class="topic-draw-heading"><div><p class="eyebrow">本回合入口</p><h3>抽一道题，直接开口</h3><p>只从已学的结构中出题 · 约 5 秒完成选择</p></div><span class="draw-step-count">${stage}<small>/ 3</small></span></div>
     <ol class="draw-sequence" aria-label="抽题步骤"><li class="${stage >= 1 ? "is-current" : ""}"><span>1</span>浏览</li><li class="${stage >= 2 ? "is-current" : ""}"><span>2</span>定格</li><li class="${stage >= 3 ? "is-current" : ""}"><span>3</span>开口</li></ol>
     <p class="draw-status" aria-live="polite">${icon(status === "settled" ? "check" : status === "spinning" ? "clock" : "shuffle")}${escapeHtml(statusText)}</p>
     <div class="topic-draw-window">
       <div class="topic-draw-marker" aria-hidden="true"></div>
       <div class="topic-draw-track${status === "idle" ? " is-idle" : status === "spinning" ? " is-spinning" : " is-settled"}" data-draw-offset="${offset}" data-idle-offset="${idleOffset}">
-        ${cards.map((card, index) => `<article class="topic-draw-card${status === "settled" && index === winnerIndex ? " is-winner" : ""}"><div><span class="family-tag family-${card.family}">${escapeHtml(card.scenarioLabel)}</span><span>L${card.difficulty}</span></div><strong>${escapeHtml(card.topicLabel)}</strong><p>${escapeHtml(card.title)}</p></article>`).join("")}
+        ${cards.map((card, index) => `<article class="topic-draw-card${status === "settled" && index === winnerIndex ? " is-winner" : ""}"><div><span class="line-tag line-${card.line}">${escapeHtml(card.lineLabel)}</span><span>L${card.difficulty}</span></div><strong>${escapeHtml(card.contextLabel)}</strong><p>${escapeHtml(card.title)}</p></article>`).join("")}
       </div>
     </div>
-    ${status === "settled" && draw?.winnerId ? `<div class="draw-result"><span>${escapeHtml(draw.selectionReason)}</span><strong>${escapeHtml(ARENA_CARD_MAP.get(draw.winnerId)?.title ?? "已选场景")}</strong><p>${escapeHtml(ARENA_CARD_MAP.get(draw.winnerId)?.situation ?? "")}</p></div>` : ""}
+    ${status === "settled" && winner ? `<div class="draw-result"><span>${escapeHtml(draw.selectionReason)}</span><strong>${escapeHtml(winner.title)}</strong><p>${escapeHtml(winner.situation)}</p></div>` : ""}
   </section>`;
 }
 
@@ -661,540 +431,90 @@ function applyTopicDrawMotion() {
  * 首页主按钮：先抽题轮转，定格后才进入训练，保证“浏览 → 定格 → 开始”三步一致。
  *
  * @param {object|null} draw 当前抽题状态
- * @param {object|undefined} card 已定格的实战卡，用于估算时长
+ * @param {object|undefined} card 已定格的练习题，用于估算时长
  * @returns {string} 按钮 HTML
  */
 function renderHomeStartAction(draw, card) {
   if (draw?.status === "spinning") {
     return `<button class="button button-primary button-large" type="button" disabled>${icon("clock")}<span>正在抽取题目…</span></button>`;
   }
-  const label = draw?.status === "settled" && card ? `开始这一回合 · 约 ${estimateDrillMinutes(card, state.homeMode)} 分钟` : "抽一个实战场景";
+  const label = draw?.status === "settled" && card ? `开始这一回合 · 约 ${estimateDrillMinutes(card, state.homeMode)} 分钟` : "抽一道练习题";
   return `<button class="button button-primary button-large" type="button" data-action="start-home">${icon(draw?.status === "settled" ? "play" : "shuffle")}<span>${label}</span></button>`;
 }
 
-/** 首页顶部的模式切换：学习模式（模仿结构）与实践模式（实战演练）。 */
-function renderTrackSwitch(track) {
-  const option = (value, label, hint) => `<button type="button" role="radio" aria-checked="${track === value}" tabindex="${track === value ? "0" : "-1"}" class="${track === value ? "is-active" : ""}" data-action="home-track" data-value="${value}"><span>${label}</span><small>${hint}</small></button>`;
-  return `<div class="segmented track-switch" role="radiogroup" aria-label="训练模式">${option("learn", "学习模式", "看示范、拆结构、模仿复述、迁移")}${option("practice", "实践模式", "直接上场：限时开口、被打断、自查重讲")}</div>`;
-}
+/**
+ * 首页“今日计划”：进行中 → 到期复练 → 推荐一课 → 练习抽题 → 概览。
+ *
+ * @returns {string} 首页 HTML
+ */
+function renderHome() {
+  const stats = practiceStats(state.drills);
+  const learned = learnedParadigms(state.lessonRuns);
+  const drill = state.activeDrill?.status === "in_progress" ? state.activeDrill : null;
+  const drillCard = drill ? PRACTICE_CARD_MAP.get(drill.cardId) : null;
+  const lessonRun = state.activeLesson?.status === "in_progress" ? state.activeLesson : null;
+  const lessonParadigm = lessonRun ? PARADIGM_MAP.get(lessonRun.paradigmId) : null;
+  const nextLesson = recommendedLesson(state.lessonRuns);
+  const revisit = dueRevisits(state.drills)[0];
+  const revisitCard = revisit ? PRACTICE_CARD_MAP.get(revisit.cardId) : null;
+  const draw = currentTopicDraw();
+  const drawnCard = draw?.winnerId ? PRACTICE_CARD_MAP.get(draw.winnerId) : null;
+  const stage = CAREER_STAGE_LABELS[state.settings.careerStage] ?? CAREER_STAGE_LABELS.phd;
+  const todayKey = dateKey(new Date());
+  const learnedToday = state.lessonRuns.some((run) => run.schemaVersion === 2 && run.status === "completed" && dateKey(run.completedAt) === todayKey);
 
-function renderLearnHomePage() {
-  const learned = learnedScenarios(state.lessonRuns).size;
+  // 进行中的回合优先展示；课程也在进行中时，再补一个简洁的“继续第 N 课”入口
+  const lessonTitle = `第 ${escapeHtml(String(lessonParadigm?.order ?? ""))} 课 · ${escapeHtml(lessonParadigm?.title ?? "")}`;
+  const continueTitle = drill ? escapeHtml(drillCard?.title ?? drill.title ?? "练习回合") : lessonTitle;
+  const continueBlock = drill || lessonRun
+    ? `<section class="focus-band"><div class="focus-icon">${icon("play")}</div><div><p class="eyebrow">继续</p><h2>${continueTitle}</h2><p>进度已保存在当前设备。</p></div><button class="button button-primary" type="button" data-action="${drill ? "resume-drill" : "resume-lesson"}">继续${icon("chevronRight")}</button></section>`
+    : "";
+  const continueLessonBlock = drill && lessonRun
+    ? `<section class="focus-band focus-band-quiet"><div class="focus-icon">${icon("book")}</div><div><p class="eyebrow">课程进行中</p><h2>${lessonTitle}</h2></div><button class="button button-secondary" type="button" data-action="resume-lesson">继续第 ${escapeHtml(String(lessonParadigm?.order ?? ""))} 课${icon("chevronRight")}</button></section>`
+    : "";
+  const revisitBlock = !drill && revisitCard
+    ? `<section class="focus-band"><div class="focus-icon">${icon("rotate")}</div><div><p class="eyebrow">到期复练 · ${stats.revisitsDue} 个</p><h2>${escapeHtml(revisitCard.title)}</h2><p>上次首轮有没做到的项。这次会换一组打断和追问，检验改进有没有留下来。</p></div><button class="button button-secondary" type="button" data-action="start-revisit">开始复练${icon("chevronRight")}</button></section>`
+    : "";
+  const lessonBlock = !lessonRun && (!learned.size || (!learnedToday && learned.size < 30))
+    ? `<section class="focus-band"><div class="focus-icon">${icon("book")}</div><div><p class="eyebrow">${learned.size ? "可选 · 今天学一课" : "从这里开始"}</p><h2>第 ${nextLesson.order} 课 · ${escapeHtml(nextLesson.title)}</h2><p>${escapeHtml(nextLesson.structure)}。${escapeHtml(nextLesson.whenToUse)}</p></div><button class="button button-primary" type="button" data-action="lesson-start" data-paradigm="${escapeHtml(nextLesson.id)}">开始这一课${icon("chevronRight")}</button></section>`
+    : "";
+  const practiceBlock = learned.size && !drill
+    ? `<section class="practice-entry" aria-labelledby="today-title">
+        <div class="entry-main">
+          <div class="entry-kicker"><span class="status-badge ${draw?.status === "settled" ? "status-done" : "status-ready"}">${draw?.status === "settled" ? "已选出题目" : "练习回合"}</span><span>${state.homeMode === "quick" ? "闪电回合" : "完整回合"} · 从已学的 ${learned.size} 种结构中出题</span></div>
+          <h2 id="today-title">${drawnCard ? escapeHtml(drawnCard.title) : "抽一道题，30 秒内开口"}</h2>
+          <p class="entry-description">${drawnCard ? escapeHtml(drawnCard.goal) : "准备阶段会先引导你判断场景、选对结构；讲完再对照这道题的最优方案。"}</p>
+          ${renderTopicDraw(draw)}
+        </div>
+        <aside class="entry-controls">${renderModeSelector(state.homeMode)}${renderHomeStartAction(draw, drawnCard)}<button class="button button-ghost explore-topics" type="button" data-action="explore-topics">${icon("shuffle")}换一题</button></aside>
+      </section>`
+    : "";
+  const weakness = stats.weakness;
+  const weaknessText = weakness
+    ? `首轮${weakness.kind === "structure" ? "步骤覆盖率" : "做到率"} ${weakness.rate}%，抽题会优先安排考核这一项的题。`
+    : "完成 3 个回合后，系统会根据首轮没做到的项找出弱项。";
+  const headline = stats.today ? `今天已完成 ${stats.today} 回合` : learned.size ? "今天先开口一次" : "先学会第一种表达结构";
   const content = `
-    <div class="home-intent-bar"><div><p class="eyebrow">今日训练</p><h1>${learned ? `已掌握 ${learned} 种表达结构` : "先学会一种表达结构"}</h1><p>表达新手先模仿：看一个好回答为什么好，收起示范复述它，再把同一个结构用到另一个行业。学完的结构会在实践模式里优先出现。</p></div><div class="intent-streak"><span>已学结构</span><strong>${learned}</strong><small>/ 19</small></div></div>
-    ${renderTrackSwitch("learn")}
-    ${renderLearnHome({ runs: state.lessonRuns, activeRun: state.activeLesson }, { escapeHtml, icon })}
+    <div class="home-intent-bar"><div><p class="eyebrow">今日训练 · ${escapeHtml(stage.label)}</p><h1>${headline}</h1><p>从“不知道怎么开口”到“能说会道”：先学一种结构，再在学术、生活、转化、创业四条线的真实场合里用出来。</p></div><div class="intent-streak"><span>已学结构</span><strong>${learned.size}</strong><small>/ 30</small></div></div>
+    ${continueBlock}${continueLessonBlock}${revisitBlock}${lessonBlock}${practiceBlock}
+    <section class="focus-band focus-band-quiet" aria-labelledby="focus-title"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">当前弱项（按首轮冷启动统计）</p><h2 id="focus-title">${weakness ? escapeHtml(weaknessLabel(weakness)) : "还在观察"}</h2><p>${weaknessText}</p></div><button class="button button-secondary" type="button" data-action="navigate" data-view="ability">查看依据${icon("chevronRight")}</button></section>
+    <section class="progress-strip progress-strip-overview" aria-label="训练概览"><div><span>今日回合</span><strong>${stats.today}</strong></div><div><span>近 7 天</span><strong>${stats.last7}</strong></div><div><span>连续天数</span><strong>${stats.streak}</strong></div><div><span>接住打断</span><strong>${stats.pressureRate == null ? "—" : `${stats.pressureRate}%`}</strong></div>${Object.entries(LINES).map(([id, line]) => `<div><span>${escapeHtml(line.label)}</span><strong>${stats.lineCounts[id] ?? 0}</strong></div>`).join("")}</section>
   `;
-  return renderShell(content, { title: "学习模式" });
+  return renderShell(content, { title: "今日训练" });
 }
 
 /**
- * 首页：按模式显示学习路径或实战回合入口。
+ * 30 课页：五个阶段的课程地图，点任意一课开始学习。
+ *
+ * @returns {string} 课程页 HTML
  */
-function renderHome() {
-  if (state.settings.homeTrack !== "practice") {
-    return renderLearnHomePage();
-  }
-  const stats = arenaStats(state.drills);
-  const drill = state.activeDrill?.status === "in_progress" ? state.activeDrill : null;
-  const drillCard = drill ? ARENA_CARD_MAP.get(drill.cardId) : null;
-  const draw = currentTopicDraw();
-  const drawnCard = draw?.winnerId ? ARENA_CARD_MAP.get(draw.winnerId) : null;
-  const weak = stats.weakest ? CHECKS[stats.weakest] : null;
-  const statusTitle = drill ? "有一个回合等你继续"
-    : draw?.status === "spinning" ? "看看会停在哪个场景"
-      : draw?.status === "settled" ? "场景已定，准备开口"
-        : stats.today > 0 ? `今天已完成 ${stats.today} 回合` : "今天先开口一次";
-  const primaryAction = drill
-    ? `<button class="button button-primary button-large" type="button" data-action="resume-drill">${icon("play")}<span>继续当前回合</span></button>`
-    : renderHomeStartAction(draw, drawnCard);
-  const legacyActive = state.activeSession && state.activeSession.stage !== "complete";
+function renderLessonsPage() {
+  const learned = learnedParadigms(state.lessonRuns).size;
   const content = `
-    <div class="home-intent-bar"><div><p class="eyebrow">实践模式 · 先开口，再补课，带着追问重讲</p><h1>${statusTitle}</h1><p>${drill ? escapeHtml(drillCard?.title ?? drill.title) : "每个回合都是一个真实工作或社交场景：限时开口、中途被打断、回听逐项检查、补上行业认知，再接受追问重讲一次。"}</p></div><div class="intent-streak"><span>连续训练</span><strong>${stats.streak}</strong><small>天</small></div></div>
-    ${renderTrackSwitch("practice")}
-    <section class="practice-entry${drill ? " has-active" : ""}" aria-labelledby="today-title">
-      <div class="entry-main">
-        <div class="entry-kicker"><span class="status-badge ${drill ? "status-active" : draw?.status === "settled" ? "status-done" : "status-ready"}">${drill ? "进行中" : draw?.status === "settled" ? "已选出场景" : "准备开始"}</span><span>${state.homeMode === "quick" ? "闪电回合" : "完整回合"}${stats.revisitsDue ? ` · ${stats.revisitsDue} 个回合到期复练` : ""}</span></div>
-        <h2 id="today-title">${drill ? escapeHtml(drillCard?.scenarioLabel ?? "实战回合") : drawnCard ? escapeHtml(drawnCard.title) : "抽一个场景，30 秒内开口"}</h2>
-        <p class="entry-description">${drill ? "进度已保存在当前设备，回到工作台会从当前步骤继续。" : drawnCard ? escapeHtml(drawnCard.goal) : "不需要先准备好。真实场合也不会等你准备好。"}</p>
-        ${drill ? `<div class="active-next-step"><span>${icon("arrowRight")}下一步</span><strong>回到实战工作台</strong><p>保持当前场景，不重新选择。</p></div>` : renderTopicDraw(draw)}
-      </div>
-      <aside class="entry-controls">${drill ? primaryAction : `${renderModeSelector(state.homeMode)}${renderFamilySelect(state.homeScene)}${primaryAction}<button class="button button-ghost explore-topics" type="button" data-action="explore-topics">${icon("shuffle")}换一个场景</button>`}</aside>
-    </section>
-    ${legacyActive ? `<section class="focus-band focus-band-quiet"><div class="focus-icon">${icon("book")}</div><div><p class="eyebrow">主题题库</p><h2>还有一项主题训练未完成</h2><p>${escapeHtml(state.activeSession.title ?? "")}</p></div><button class="button button-secondary" type="button" data-action="resume-session">继续${icon("chevronRight")}</button></section>` : ""}
-    <section class="focus-band focus-band-quiet" aria-labelledby="focus-title"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">当前弱项（按首轮冷启动统计）</p><h2 id="focus-title">${weak ? escapeHtml(weak.label) : "还在观察"}</h2><p>${weak ? `${escapeHtml(weak.question)}。首轮做到率 ${stats.rates[stats.weakest].firstRate}%，自适应抽题会优先安排考核这一项的场景。` : "完成 3 个回合后，系统会根据你首轮没做到的行为安排场景。"}</p></div><button class="button button-secondary" type="button" data-action="navigate" data-view="ability">查看依据${icon("chevronRight")}</button></section>
-    <section class="progress-strip" aria-label="训练概览"><div><span>今日回合</span><strong>${stats.today}</strong></div><div><span>近 7 天</span><strong>${stats.last7}</strong></div><div><span>行业覆盖</span><strong>${stats.industriesCovered}<small>/ ${stats.industriesTotal}</small></strong></div><div><span>接住打断</span><strong>${stats.pressureRate == null ? "—" : `${stats.pressureRate}%`}</strong></div><button class="text-button" type="button" data-action="navigate" data-view="history">查看记录${icon("arrowRight")}</button></section>
+    <div class="page-heading"><div><p class="eyebrow">学习路径</p><h1>30 课：表达的全部结构</h1><p>五个阶段：敢开口 → 讲清楚 → 能交锋 → 能推动 → 创业者。每课学一种结构，学完后它就会进入练习题池。</p></div><div class="library-count"><strong>${learned}</strong><span>/ 30 已学</span></div></div>
+    ${renderCurriculumMap({ runs: state.lessonRuns, activeRun: state.activeLesson }, { escapeHtml })}
   `;
-  return renderShell(content, { title: "实践模式" });
-}
-
-function renderTaskPreview(session, card) {
-  const stageEntries = Object.entries(session.stageMinutes).filter(([stage, minutes]) => stage !== "organize" && minutes > 0);
-  const sensitiveNotice = cardIsSensitive(card)
-    ? `<section class="sensitive-task-notice" aria-labelledby="sensitive-task-title">
-        <div>${icon("info")}</div>
-        <div><p class="eyebrow">完全自愿 · ${escapeHtml(sensitiveFlagText(card))}</p><h2 id="sensitive-task-title">你可以不解释原因，立即换一张</h2><p>是否练习由你决定。跳过不会占用普通“换一次题”的额度，也不会影响连续完成或训练评价；如果下一张仍不合适，可以继续跳过。</p></div>
-        <button class="button button-secondary" type="button" data-action="skip-sensitive-task">立即跳过这张</button>
-      </section>`
-    : "";
-  return `
-    <div class="training-header-row">
-      <button class="icon-button" type="button" data-action="navigate" data-view="home" title="返回首页" aria-label="返回首页">${icon("chevronLeft")}</button>
-      <div><p class="eyebrow">今日任务 · ${escapeHtml(PROTOCOLS[card.protocol].label)}</p><h1>先看清任务，再开始计时</h1></div>
-      <span class="save-state${state.saveStatus === "error" ? " is-error" : ""}">${saveStateMarkup()}</span>
-    </div>
-    <article class="task-preview">
-      <div class="task-preview-main">
-        <div class="card-meta"><span class="scene-tag scene-${card.scene}">${escapeHtml(card.sceneLabel)}</span><span class="domain-tag domain-${card.domain}">${escapeHtml(card.domainLabel)}</span><span>L${card.difficulty}</span><span>${session.mode === "quick" ? "快速模式" : "完整闭环"}</span></div>
-        <p class="topic-label">${escapeHtml(card.topicLabel)}</p>
-        <h2>${escapeHtml(card.title)}</h2>
-        <div class="task-facts">
-          <div><span>目标受众</span><strong>${escapeHtml(card.audience)}</strong></div>
-          <div><span>沟通目的</span><strong>${escapeHtml(card.purpose)}</strong></div>
-          <div><span>主要能力</span><strong>${escapeHtml(card.primarySkill)}</strong></div>
-          <div><span>情境背景</span><strong>${escapeHtml(card.context)}</strong></div>
-        </div>
-      </div>
-      <aside class="task-preview-side">
-        <div class="estimate"><span>${icon("clock")}预计总时长</span><strong>${totalEstimatedMinutes(session)}<small> 分钟</small></strong></div>
-        <ol class="protocol-preview">
-          ${stageEntries.map(([stage, minutes]) => `<li><span>${escapeHtml(stageLabel(card.protocol, stage))}</span><strong>${minutes} 分钟</strong></li>`).join("")}
-        </ol>
-      </aside>
-    </article>
-    ${sensitiveNotice}
-    <section class="criteria-section">
-      <div><p class="eyebrow">完成标准</p><h2>本轮做到这些就算完成</h2></div>
-      <ul class="check-list">${card.completionCriteria.map((item) => `<li>${icon("check")}<span>${escapeHtml(item)}</span></li>`).join("")}</ul>
-    </section>
-    <div class="action-bar preview-actions"><button class="button button-ghost" type="button" data-action="open-swap"${session.swapUsed ? " disabled" : ""}>${icon("shuffle")}<span>${session.swapUsed ? "本轮已换过一次" : "换一次题"}</span></button><button class="button button-primary button-large" type="button" data-action="start-training">开始第一阶段${icon("arrowRight")}</button></div>
-  `;
-}
-
-function renderStageProgress(session) {
-  const stages = orderedStages().filter((stage) => stage !== "complete");
-  const activeIndex = Math.max(0, stages.indexOf(session.stage));
-  const labels = stages.map((stage, index) => {
-    const active = stage === session.stage;
-    const done = session.stageIndex > index;
-    return `<li class="${active ? "is-active" : done ? "is-done" : ""}"${active ? ' aria-current="step"' : ""}><span>${done ? icon("check") : index + 1}</span><small>${escapeHtml(stageLabel(session.protocol, stage))}</small></li>`;
-  }).join("");
-  const nextStage = stages[activeIndex + 1];
-  return `<div class="stage-route"><ol class="stage-progress" aria-label="训练进度">${labels}</ol><div class="stage-route-caption"><span>第 ${activeIndex + 1} 步，共 ${stages.length} 步</span><span>${nextStage ? `接下来：${escapeHtml(stageLabel(session.protocol, nextStage))}` : "最后一步：完成本轮复盘"}</span></div></div>`;
-}
-
-function renderTimer(session) {
-  const timer = session.timer;
-  const remaining = timerRemaining(timer);
-  const elapsed = currentElapsed(timer);
-  const maximum = Math.max(timer?.durationSeconds ?? 1, elapsed, 1);
-  const over = remaining < 0;
-  const running = Boolean(timer?.runningSince);
-  return `<section class="stage-timer${over ? " is-over" : ""}" aria-label="阶段计时器">
-    <div class="timer-readout"><span>${over ? "已超时" : running ? "剩余时间" : elapsed > 0 ? "已暂停" : "阶段计时"}</span><strong data-timer-text>${over ? "+" : ""}${formatDuration(remaining)}</strong><small>目标 ${formatDuration(timer?.durationSeconds ?? 0)}</small></div>
-    <progress data-timer-progress value="${Math.min(elapsed, maximum)}" max="${maximum}" aria-label="已用时间"></progress>
-    <div class="timer-actions">
-      <button class="button button-secondary" type="button" data-action="toggle-timer">${icon(running ? "pause" : "play")}<span>${running ? "暂停" : elapsed > 0 ? "继续" : "开始计时"}</span></button>
-      <button class="button button-ghost" type="button" data-action="extend-timer">${icon("plus")}延长 5 分钟</button>
-    </div>
-  </section>`;
-}
-
-function timingGuidanceForSession(session, card) {
-  if (card.protocol === "interactive_communication") {
-    return card.structureSteps.map((step, index) => `第 ${index + 1} 轮附近：${step}`);
-  }
-  const totalSeconds = (session.stageMinutes.firstDelivery ?? 0) * 60;
-  const slice = Math.max(1, Math.floor(totalSeconds / card.structureSteps.length));
-  return card.structureSteps.map((step, index) => {
-    const start = index * slice;
-    const end = index === card.structureSteps.length - 1 ? totalSeconds : (index + 1) * slice;
-    return `${start}-${end} 秒：${step}`;
-  });
-}
-
-function renderStageShell(session, card, body, sidebar = "") {
-  return `
-    <div class="training-header-row compact">
-      <button class="icon-button" type="button" data-action="navigate" data-view="home" title="暂时离开" aria-label="暂时离开训练">${icon("chevronLeft")}</button>
-      <div><p class="eyebrow">${escapeHtml(card.sceneLabel)} · ${escapeHtml(card.topicLabel)}</p><h1>${escapeHtml(stageLabel(card.protocol, session.stage))}</h1></div>
-      <span class="save-state${state.saveStatus === "error" ? " is-error" : ""}">${saveStateMarkup()}</span>
-    </div>
-    ${renderStageProgress(session)}
-    <div class="stage-layout">
-      <div class="stage-primary">${body}</div>
-      <aside class="stage-sidebar">${renderTimer(session)}${sidebar}</aside>
-    </div>
-  `;
-}
-
-function renderHelp(session, card) {
-  const level = session.helpLevels?.[session.stage] ?? 0;
-  if (level === 0) {
-    return `<section class="help-panel collapsed"><div><h3>卡住时按层求助</h3><p>每次只打开一层，系统仍不会提供主题答案或成稿。</p></div><button class="button button-ghost" type="button" data-action="unlock-help">我卡住了</button></section>`;
-  }
-  const unanswered = card.researchPrompts.filter((prompt) => !session.researchChecks?.[prompt]);
-  const content = [
-    `<strong>第 1 层 · 重述目标</strong><p>本轮要面向“${escapeHtml(card.audience)}”，完成“${escapeHtml(card.purpose)}”。</p>`,
-    `<strong>第 2 层 · 未回答的问题</strong><ul>${(unanswered.length ? unanswered : card.researchPrompts).slice(0, 3).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`,
-    `<strong>第 3 层 · 检索词方向</strong><p>组合检索“${escapeHtml(card.topicLabel)} + 定义 / 机制 / 证据 / 反方 / 局限”，再根据受众缩小范围。</p>`,
-    `<strong>第 4 层 · 来源类型</strong><p>优先寻找原始规则、政府或大学页面、专业机构、论文或可靠书籍，并核对发布日期与适用对象。</p>`,
-    `<strong>第 5 层 · 结构问题</strong><p>开头要解决听众的什么疑问？中段哪条证据真正支撑主旨？结尾需要保留什么边界？</p>`,
-    `<strong>第 6 层 · 降级选择</strong><p>可以回到首页结束并记录未完成，或下一次使用快速模式和更低难度题卡。</p>`,
-
-  ];
-  return `<section class="help-panel"><div class="help-head"><div><p class="eyebrow">分层帮助 ${level} / 6</p><h3>只提供下一步问题</h3></div>${level < 6 ? `<button class="button button-ghost" type="button" data-action="unlock-help">再打开一层</button>` : ""}</div><div class="help-levels">${content.slice(0, level).map((item) => `<div>${item}</div>`).join("")}</div></section>`;
-}
-
-function analogousExampleLine(step, protocol) {
-  const examples = {
-    research_expression: {
-      define: "这里讨论的延长开放，是周末固定增加两个小时，不包括通宵开放。",
-      claim: "我的建议是先试行四周，而不是立即长期调整。",
-      evidence: "预约记录显示需求主要集中在周六下午，这支持试行，但不能证明所有周末都有同样需求。",
-      reason: "延长开放可能缓解高峰拥挤，也能让工作日无法到馆的人获得稳定时段。",
-      counter: "不过，如果额外人力和安全成本超过可承受范围，就应缩短试行时段。",
-      example: "例如，考试周座位提前约满，说明特定时期确有需求，但这个个例不能代表全年。",
-      action: "因此可由运营人员连续四周记录到访量、成本和投诉，再决定是否保留。",
-      target: "对周末才有时间的读者来说，真正需要的是一个可预期的固定时段。",
-      close: "所以当前能确定的是值得小范围验证，而不是已经证明必须永久延长。",
-    },
-    impromptu_expression: {
-      define: "这里说的高效，既包括会议时长，也包括会后是否需要返工。",
-      claim: "我的判断是线上会议不一定更高效，它取决于任务类型和会前准备。",
-      evidence: "如果议题和材料提前明确，线上形式能减少切换成本；否则只是把混乱搬到屏幕上。",
-      reason: "效率来自信息准备和决策方式，而不是会议工具本身。",
-      counter: "不过，涉及复杂共创或敏感沟通时，线下互动可能更容易发现误解。",
-      example: "例如，十分钟状态同步适合线上，但第一次讨论复杂方案时可能需要更丰富的互动。",
-      action: "因此可以先按任务类型选形式，并在会后检查是否形成清楚决定。",
-      target: "参与者真正需要的不是少见面，而是减少无结论的时间消耗。",
-      close: "所以问题不在于线上还是线下，而在于哪种形式更适合当前任务。",
-    },
-    interactive_communication: {
-      define: "我先确认一下：你担心改时间会影响接送安排，对吗？",
-      claim: "我想提出一个可调整的方案，不希望让任何人被迫接受。",
-      evidence: "目前三个人周三冲突，另外两个人周四不便，这是我们已经确认的事实。",
-      reason: "共同目标是让关键成员能参加，同时不要把成本转移给某一个人。",
-      counter: "如果周四仍让你很困难，我们可以保留原时间，改用异步补充。",
-      example: "比如先试一次周四会议，会后再确认是否真的改善参与情况。",
-      action: "你愿意在周四试一次，还是更倾向保留周三并调整议程？",
-      target: "我们都希望信息不遗漏，也希望每个人的现实限制被看见。",
-      close: "你可以选择其中一个方案，也可以提出第三种安排。",
-    },
-    formal_task: {
-      define: "本次问题是报名人数与实际到场人数差距较大，目前还不能确定具体原因。",
-      claim: "建议下一场先改进提醒和路线说明，同时补充收集未到场原因。",
-      evidence: "本次八十人报名、四十六人到场；现有反馈只提到时间和路线，样本并不完整。",
-      reason: "到场差距会影响物料、人力和场地安排，也会使活动效果判断失真。",
-      counter: "风险是新增提醒仍不能解决时间冲突，因此不能把改善全部归因于提醒。",
-      example: "例如，有参与者明确表示找不到入口，但我们不知道这是否是主要原因。",
-      action: "建议下次由运营在活动前一天发送提醒，活动后两天汇总未到场问卷。",
-      target: "负责人需要的是可验证的改进方案，而不是在证据不足时直接归因。",
-      close: "下一步先验证提醒与路线说明的影响，再决定是否调整活动时间。",
-    },
-  }[protocol];
-  if (/定义|界定|概念|标准|问题/.test(step)) return examples.define;
-  if (/结论|立场|判断|主张/.test(step)) return examples.claim;
-  if (/事实|证据|发现|数据/.test(step)) return examples.evidence;
-  if (/理由|机制|原理|影响|障碍/.test(step)) return examples.reason;
-  if (/反方|另一面|风险|顾虑|边界|局限|限制|让步/.test(step)) return examples.counter;
-  if (/例子|案例|情境|场景|故事|经历/.test(step)) return examples.example;
-  if (/方案|行动|建议|计划|实验|试行|请求|下一步/.test(step)) return examples.action;
-  if (/目标|受众|对方|共同/.test(step)) return examples.target;
-  return examples.close;
-}
-
-function learningDirection(card, prompt, index) {
-  const directions = [
-    ["界定关键词与范围", `“${card.topicLabel}” + 定义 / 范围 / 适用对象`, "记录一句自己的定义、包含什么、不包含什么。"],
-    ["理解原因或机制", `“${card.topicLabel}” + 原因 / 机制 / 如何影响`, "记录因果链，以及仍不能确定的一环。"],
-    ["寻找支撑判断的证据", `“${card.topicLabel}” + 数据 / 研究 / 案例 / 官方`, "记录证据具体支持哪句话。"],
-    ["寻找反方与适用边界", `“${card.topicLabel}” + 争议 / 反例 / 局限 / 风险`, "记录最强反方、让步点和结论成立条件。"],
-  ];
-  const [goal, query, capture] = directions[index % directions.length];
-  return { prompt, goal, query, capture };
-}
-function promptExecutionGuide(card, index) {
-  const stages = [
-    ["先宽搜", `搜索“${card.topicLabel} + 定义”，先看三个不同来源如何界定它。`],
-    ["再缩小", `加入“${card.topicLabel} + ${index % 2 ? "机制 / 影响" : "适用对象 / 条件"}”，只保留与本题受众有关的内容。`],
-    ["核对来源", "检查作者或机构、发布日期、证据方法、适用对象，以及它是否承认限制。"],
-    ["做记录", "用四行写下：它说了什么、支持哪句话、不能证明什么、我还需要查什么。"],
-  ];
-  return `<div class="prompt-execution"><p><strong>具体执行顺序</strong></p><ol>${stages.map(([label, text]) => `<li><b>${escapeHtml(label)}</b><span>${escapeHtml(text)}</span></li>`).join("")}</ol></div>`;
-}
-
-function idealExpressionForPrompt(card, prompt, index) {
-  const role = ["先定义范围", "解释机制", "给出证据", "处理反方与边界"][index % 4];
-  return `<article class="final-expression-card"><h4>问题 ${index + 1}：${escapeHtml(prompt)}</h4><p><strong>在最终表达中的作用：</strong>${escapeHtml(role)}，不要把搜索结果逐条朗读。</p><blockquote>“关于${escapeHtml(card.topicLabel)}，我先把问题限定为【${escapeHtml(prompt)}中的具体范围】。我的暂定判断是【你的判断】，因为【机制或理由】。目前最直接的依据是【来源与证据】，但它不能说明【证据边界】。如果【反方条件】出现，这个判断需要调整。因此，面向${escapeHtml(card.audience)}，更合适的下一步是【行动或结论】。”</blockquote><details><summary>这段话是怎样形成的</summary><ol><li>用这个问题确定要查的范围。</li><li>用来源卡把事实与解释分开。</li><li>从证据中提炼一个有限判断。</li><li>主动加入反方、限制和不确定性。</li><li>根据受众和沟通目的收束成行动或条件化结论。</li></ol></details></article>`;
-}
-
-function renderFinalExpressionGuide(card) {
-  return `<section class="workspace-section final-expression-guide"><div class="section-heading"><div><p class="eyebrow">最后一步 · 先看清楚如何表达</p><h2>每个学习问题如何进入最终表达</h2><p>这是结构化示范，不是当前题目的事实答案。把中括号替换成你自己检索、核验和判断后的内容。</p></div></div><div class="final-expression-list">${card.researchPrompts.map((prompt, index) => idealExpressionForPrompt(card, prompt, index)).join("")}</div></section>`;
-}
-
-function analogousScenario(protocol) {
-  return {
-    research_expression: "社区图书馆是否延长周末开放时间",
-    impromptu_expression: "线上会议是否一定更高效",
-    interactive_communication: "与同伴协商调整小组会议时间",
-    formal_task: "汇报一次活动报名后到场不足",
-  }[protocol] ?? "一个相似的日常决策问题";
-}
-
-function stepGuidance(step) {
-  if (/定义|界定|概念|标准/.test(step)) return ["先把对象、关键词和范围说清楚。", "这里所说的……是指……，本次只讨论……"];
-  if (/结论|立场|判断|主张/.test(step)) return ["用一句可被反驳、带条件的判断回答题目。", "我的暂定判断是……，前提是……"];
-  if (/事实|证据|发现|数据/.test(step)) return ["只选直接支撑上一句的证据，并说明来源。", "我找到的关键信息是……，它只能说明……"];
-  if (/理由|机制|原理|影响|问题|障碍/.test(step)) return ["解释为什么，不只重复结论，把因果链说完整。", "之所以这样判断，是因为……会进一步导致……"];
-  if (/反方|另一面|风险|顾虑|边界|局限|限制|让步/.test(step)) return ["呈现最强反方或失败条件，再调整结论。", "不过，如果……，这个判断就需要调整，因为……"];
-  if (/例子|案例|情境|场景|故事|经历/.test(step)) return ["用一个具体场景让抽象关系可见，不让个例代替证据。", "例如，在……这个具体场景里，可以看到……"];
-  if (/方案|行动|建议|计划|实验|试行|请求|下一步/.test(step)) return ["提出责任、时间和验证标准清楚的下一步。", "因此，下一步可以先……，由……在……前完成。"];
-  if (/目标|受众|对方|共同/.test(step)) return ["先连接听众真正关心的目标。", "对……来说，真正需要解决的是……"];
-  if (/反思|回扣|收束|开放|选择/.test(step)) return ["回到开头问题，给出有限结论或保留选择。", "回到一开始的问题，我目前能确定的是……"];
-  return ["说明这一节点在主线中的作用，并连接前后句。", "基于前一点，接下来需要说明的是……"];
-}
-
-function renderSpeakingOutline(session, card) {
-  const notes = card.organizingTemplate.map((key) => session.userNotes?.[key]?.trim() ?? "");
-  return card.structureSteps.map((step, index) => {
-    const [, starter] = stepGuidance(step);
-    const note = notes[index % Math.max(1, notes.length)];
-    return `<article><div><span>${index + 1}</span><strong>${escapeHtml(step)}</strong></div><p>${escapeHtml(starter)}</p><blockquote>${note ? escapeHtml(note) : "等待填写对应观点整理项"}</blockquote></article>`;
-  }).join("");
-}
-
-function updateSpeakingOutline() {
-  const panel = root.querySelector("[data-speaking-outline]");
-  const card = cardForSession();
-  if (panel && card) panel.innerHTML = renderSpeakingOutline(state.activeSession, card);
-}
-
-function renderResearch(session, card) {
-  const requiresSources = ["standard", "sensitive"].includes(card.sourceMode);
-  const sourceRows = session.sources ?? [];
-  const filled = card.organizingTemplate.filter((item) => session.userNotes?.[item]?.trim()).length;
-  const body = `
-    <section class="stage-intro learning-stage-intro"><p class="eyebrow">学习、判断、整理在同一阶段完成</p><h2>${escapeHtml(card.title)}</h2><p>${escapeHtml(card.context)}</p><ol class="learning-route"><li><span>1</span><div><strong>拆解学习问题</strong><p>明确要学什么、用什么关键词搜索、最终记录什么。</p></div></li><li><span>2</span><div><strong>建立证据卡</strong><p>记录来源及其真正支持的判断。</p></div></li><li><span>3</span><div><strong>形成有限观点</strong><p>填写判断、理由、证据、反方和边界。</p></div></li><li><span>4</span><div><strong>映射成表达骨架</strong><p>把笔记放入结构节点，形成口头提纲。</p></div></li></ol></section>
-    <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 1 步</p><h2>按问题学习，而不是漫无目的搜索</h2><p>每处理完一项再勾选，并留下可供观点整理的信息。</p></div><span class="count-badge" data-research-count>${Object.values(session.researchChecks ?? {}).filter(Boolean).length} / ${card.researchPrompts.length}</span></div><div class="research-plan">${card.researchPrompts.map((prompt, index) => { const direction = learningDirection(card, prompt, index); return `<article><label><input type="checkbox" data-research-prompt="${index}"${checked(session.researchChecks?.[prompt])}><span><b>问题 ${index + 1}</b>${escapeHtml(prompt)}</span></label><dl><div><dt>学习目标</dt><dd>${escapeHtml(direction.goal)}</dd></div><div><dt>检索方向</dt><dd>${escapeHtml(direction.query)}</dd></div><div><dt>完成产物</dt><dd>${escapeHtml(direction.capture)}</dd></div></dl>${promptExecutionGuide(card, index)}</article>`; }).join("")}</div></section>
-    <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 2 步</p><h2>${requiresSources ? "把检索结果变成证据卡" : "核对事实、观察与边界"}</h2><p>${requiresSources ? "至少保留两个来源；每张卡写清它支持哪一句、不能证明什么。" : "把已知事实、个人观察和推测分开。"}</p></div>${requiresSources ? `<button class="button button-secondary" type="button" data-action="add-source">${icon("plus")}添加证据卡</button>` : ""}</div>${requiresSources ? `<div class="source-list">${sourceRows.length ? sourceRows.map((source, index) => renderSourceRow(source, index)).join("") : `<div class="empty-inline"><p>还没有证据卡。</p><button class="button button-secondary" type="button" data-action="add-source">${icon("plus")}添加第一张证据卡</button></div>`}</div>` : `<div class="boundary-note">${card.sourceRequirements.map((item) => `<p>${icon("check")}<span>${escapeHtml(item)}</span></p>`).join("")}</div>`}<label class="confirmation-check"><input type="checkbox" data-session-field="sourceRequirementsMet"${checked(session.sourceRequirementsMet)}><span>我已区分事实、来源观点和个人推测，并写下至少一个反方或适用边界。</span></label></section>
-    <section class="workspace-section learning-step"><div class="section-heading"><div><p class="eyebrow">第 3 步</p><h2>把材料转成自己的有限观点</h2><p>每格先写判断，再补“因为—证据—但是”。</p></div><span class="count-badge" data-organize-count>${filled} / ${card.organizingTemplate.length}</span></div><div class="notes-grid">${card.organizingTemplate.map((item, index) => `<label class="field note-field"><span><b>${index + 1}</b>${escapeHtml(item)}</span><textarea rows="5" data-note-key="${escapeHtml(item)}" placeholder="判断：……\n因为：……\n证据或例子：……\n但是/边界：……">${escapeHtml(session.userNotes?.[item] ?? "")}</textarea></label>`).join("")}</div></section>
-    <section class="workspace-section learning-step structure-workbench"><div class="section-heading"><div><p class="eyebrow">第 4 步</p><h2>把观点映射成 ${escapeHtml(card.structureName)}</h2><p>示例只展示信息角色和排序，不提供当前命题答案。</p></div></div><div class="structure-guide">${card.structureSteps.map((step, index) => { const [action, starter] = stepGuidance(step); return `<article><span>${index + 1}</span><div><strong>${escapeHtml(step)}</strong><p>${escapeHtml(action)}</p><small>${escapeHtml(starter)}</small></div></article>`; }).join("")}</div><details class="analogous-example"><summary>${icon("info")}相似结构示例：${escapeHtml(analogousScenario(card.protocol))}</summary><p>只模仿信息顺序，不复制示例立场、事实或结论。</p><ol>${card.structureSteps.map((step) => `<li><strong>${escapeHtml(step)}</strong><span>${escapeHtml(analogousExampleLine(step, card.protocol))}</span></li>`).join("")}</ol></details><div class="outline-panel"><div class="section-heading"><div><h3>你的结构化表达骨架</h3><p>系统只把你的笔记放进结构，不代写主题答案。请将占位句改成自己的口语。</p></div></div><div data-speaking-outline>${renderSpeakingOutline(session, card)}</div></div></section>
-    ${renderFinalExpressionGuide(card)}
-    <section class="organize-check" data-organize-check><h3>进入表达前的检查</h3>${organizeWarnings(session, card).map((item) => `<p>${icon("info")}<span>${escapeHtml(item)}</span></p>`).join("")}</section>
-    ${renderHelp(session, card)}
-    <div class="action-bar"><button class="button button-ghost" type="button" data-action="open-abandon">结束并记录未完成</button><button class="button button-primary" type="button" data-action="advance-stage">带着表达骨架进入第一次表达${icon("arrowRight")}</button></div>
-  `;
-  const sidebar = `<section class="side-note"><h3>本阶段完成标准</h3><ol><li>全部学习问题已处理</li><li>${requiresSources ? "至少两张有效证据卡" : "已区分事实与推测"}</li><li>至少三个观点整理项</li><li>能按结构节点口头复述</li></ol></section><section class="side-note"><h3>始终区分</h3><dl><div><dt>事实</dt><dd>来源可核验</dd></div><div><dt>观点</dt><dd>你的有限判断</dd></div><div><dt>推测</dt><dd>仍需验证</dd></div></dl></section>`;
-  return renderStageShell(session, card, body, sidebar);
-}
-
-function renderSourceRow(source, index) {
-  return `<fieldset class="source-row"><legend>来源 ${index + 1}</legend><div class="source-grid">
-    <label class="field"><span>来源名称</span><input type="text" value="${escapeHtml(source.name ?? "")}" data-source-index="${index}" data-source-field="name" placeholder="机构、作者或材料名称"></label>
-    <label class="field"><span>来源类型</span><select data-source-index="${index}" data-source-field="kind"><option value="fact"${selected(source.kind, "fact")}>事实或研究</option><option value="viewpoint"${selected(source.kind, "viewpoint")}>观点或解释</option><option value="counter"${selected(source.kind, "counter")}>反方或边界</option></select></label>
-    <label class="field source-url"><span>链接或出版信息</span><input type="text" value="${escapeHtml(source.url ?? "")}" data-source-index="${index}" data-source-field="url" placeholder="https://… 或书名、版本、页码"></label>
-    <label class="field source-support"><span>它支持了什么</span><textarea rows="2" data-source-index="${index}" data-source-field="support" placeholder="只记录你核验到的作用，不抄写搜索摘要">${escapeHtml(source.support ?? "")}</textarea></label>
-  </div><button class="icon-button source-remove" type="button" data-action="remove-source" data-index="${index}" title="删除来源" aria-label="删除来源 ${index + 1}">${icon("trash")}</button></fieldset>`;
-}
-
-function organizeWarnings(session, card) {
-  const notes = card.organizingTemplate.map((key) => session.userNotes?.[key]?.trim()).filter(Boolean);
-  const warnings = [];
-  if (notes.length < 3) {
-    warnings.push("至少完成三个整理项，避免只凭一个想法开始表达。");
-  }
-  if (notes.some((note) => note.length > 220)) {
-    warnings.push("有一项笔记过长。把它压缩为关键词，避免形成可照读稿件。");
-  }
-  if (!session.sourceRequirementsMet) {
-    warnings.push("尚未确认来源与边界要求，表达时不要扩大结论范围。");
-  }
-  if (warnings.length === 0) {
-    warnings.push("必要项已具备。现在删除不服务受众和目的的内容。");
-  }
-  return warnings;
-}
-
-
-function renderRecorder(session, slot) {
-  const isFirst = slot === "first";
-  const recordingId = isFirst ? session.recordingFirstId : session.recordingRetryId;
-  const unavailable = session.recordingUnavailable?.[slot];
-  const runtime = state.recordingRuntime;
-  const active = runtime?.slot === slot && runtime?.recorder?.state === "recording";
-  const requesting = runtime?.slot === slot && ["requesting", "starting"].includes(runtime?.status);
-  const saving = runtime?.slot === slot && runtime?.status === "saving";
-  const busy = requesting || saving;
-  return `<section class="recorder-panel${active ? " is-recording" : ""}">
-    <div class="recorder-status"><span class="record-dot" aria-hidden="true"></span><div><strong>${active ? "正在录音" : requesting ? "正在请求麦克风" : saving ? "正在保存录音" : recordingId ? "录音已保存在当前设备" : "录音尚未开始"}</strong><small>${active ? "完成后停止录音，计时器不会强制中断。" : busy ? "请保持当前页面，完成后即可继续。" : recordingId ? "可重新录制，新的录音会替换本阶段记录。" : "浏览器将请求麦克风权限。"}</small></div></div>
-    <div class="recorder-actions">
-      ${active ? `<button class="button button-danger" type="button" data-action="stop-recording">${icon("square")}停止并保存</button>` : `<button class="button button-primary" type="button" data-action="start-recording" data-slot="${slot}"${busy ? " disabled" : ""}>${icon("mic")}<span>${recordingId ? "重新录制" : isFirst ? "开始首次录音" : "开始重讲录音"}</span></button>`}
-      ${recordingId ? `<div class="audio-slot" data-recording-id="${escapeHtml(recordingId)}"><span>正在读取本地录音…</span></div>` : ""}
-    </div>
-    <label class="device-fallback"><input type="checkbox" data-recording-unavailable="${slot}"${checked(unavailable)}${runtime ? " disabled" : ""}><span>当前设备或环境无法录音，仍记录本次口头完成</span></label>
-  </section>`;
-}
-
-function renderDelivery(session, card) {
-  const body = `
-    <section class="delivery-focus">
-      <p class="eyebrow">使用你刚整理出的表达骨架</p><h2>${escapeHtml(card.title)}</h2><p>面向：${escapeHtml(card.audience)}。按节点表达，不必逐字照读。</p>
-      <div class="delivery-outline speaking-outline">${renderSpeakingOutline(session, card)}</div>
-    </section>
-    ${renderRecorder(session, "first")}
-    <div class="gentle-note">${icon("clock")}<p>到达目标时间后，系统只会温和提示。请完成当前句并自然收束，不会强制停止。</p></div>
-    <div class="action-bar"><button class="button button-ghost" type="button" data-action="navigate" data-view="home">暂时离开</button><button class="button button-primary" type="button" data-action="advance-stage">结束首次表达，进入复盘${icon("arrowRight")}</button></div>
-  `;
-  const sidebar = `<section class="side-note"><h3>本轮只观察</h3><p>${escapeHtml(card.primarySkill)}</p></section><section class="side-note"><h3>完成标准</h3><ul>${card.completionCriteria.slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>`;
-  return renderStageShell(session, card, body, sidebar);
-}
-
-function selfEvaluationComplete(session, card) {
-  return (
-    card.reviewMetricIds.every((id) => Number.isFinite(session.selfScores?.[id])) &&
-    session.mainProblem?.trim() &&
-    session.effectiveAction?.trim() &&
-    session.retryFocus?.trim()
-  );
-}
-
-function renderReview(session, card) {
-  const feedback = session.feedbackRevealed ? buildRuleFeedback(session, card, METRICS) : [];
-  const body = `
-    <section class="stage-intro">
-      <p class="eyebrow">先完成自评，再查看系统提示</p><h2>回听第一次表达，寻找可观察证据</h2>
-      <p>不要评价“我有没有天赋”。标出哪一段、哪一句、哪个动作让表达更清楚或更难理解。</p>
-    </section>
-    <section class="playback-section"><div><h3>第一次录音</h3><p>建议先完整听一遍，再开始打分。</p></div>${session.recordingFirstId ? `<div class="audio-slot wide" data-recording-id="${escapeHtml(session.recordingFirstId)}"><span>正在读取本地录音…</span></div>` : `<p class="muted">本次已标记为无录音口头完成。</p>`}</section>
-    ${renderMetricRows(session, card, "first")}
-    <section class="reflection-fields">
-      <label class="field"><span>本次最明显的问题</span><textarea rows="3" data-session-text="mainProblem" placeholder="写可观察行为，例如：背景讲了太久，45 秒后才出现结论">${escapeHtml(session.mainProblem)}</textarea></label>
-      <label class="field"><span>本次做得相对有效的一个动作</span><textarea rows="3" data-session-text="effectiveAction" placeholder="例如：用具体例子解释了抽象概念">${escapeHtml(session.effectiveAction)}</textarea></label>
-      <label class="field focus-field"><span>下一次只改哪一个问题</span><textarea rows="3" data-session-text="retryFocus" placeholder="只写一个动作，例如：前 20 秒直接给出判断">${escapeHtml(session.retryFocus)}</textarea></label>
-    </section>
-    <section class="feedback-lock${session.feedbackRevealed ? " is-open" : ""}">
-      <div class="feedback-lock-head">${icon(session.feedbackRevealed ? "check" : "archive")}<div><h3>${session.feedbackRevealed ? "规则提示已开放" : "系统提示尚未开放"}</h3><p>${session.feedbackRevealed ? "这些问题只基于你的分项自评和计时记录，不替你写结论。" : "完成全部分项观察和三个复盘问题后再开放。"}</p></div></div>
-      ${session.feedbackRevealed ? `<ol>${feedback.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>` : ""}
-    </section>
-    <div class="action-bar"><button class="button button-ghost" type="button" data-action="navigate" data-view="home">暂时离开</button>${session.feedbackRevealed ? `<button class="button button-primary" type="button" data-action="advance-stage">带着唯一目标重讲${icon("arrowRight")}</button>` : `<button class="button button-primary" type="button" data-action="reveal-feedback">完成自评，查看规则提示${icon("arrowRight")}</button>`}</div>
-  `;
-  const sidebar = `<section class="side-note"><h3>评分不是总分</h3><p>每项只记录当次可观察表现。系统不会把分项合并为人格或表达天赋判断。</p></section><section class="side-note"><h3>首次实际时长</h3><strong class="side-number">${formatDuration(session.stageDurations?.firstDelivery ?? 0)}</strong></section>`;
-  return renderStageShell(session, card, body, sidebar);
-}
-
-function scoreAverage(scores, ids) {
-  const values = ids.map((id) => scores?.[id]).filter(Number.isFinite);
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
-}
-
-function renderRetry(session, card) {
-  const firstAverage = scoreAverage(session.selfScores, card.reviewMetricIds);
-  const retryAverage = scoreAverage(session.retryScores, card.reviewMetricIds);
-  const body = `
-    <section class="retry-focus">
-      <p class="eyebrow">本次只改一个问题</p><h2>${escapeHtml(session.retryFocus || "尚未填写唯一改进目标")}</h2>
-      <p>保留原题、原结构和原时长。不重新调研，不增加新的观点。</p>
-    </section>
-    <section class="delivery-focus retry-delivery"><h3>${escapeHtml(card.title)}</h3><div class="delivery-keywords">${card.structureSteps.map((step, index) => `<div><span>${String(index + 1).padStart(2, "0")}</span><strong>${escapeHtml(step)}</strong></div>`).join("")}</div></section>
-    ${renderRecorder(session, "retry")}
-    ${session.recordingRetryId || session.recordingUnavailable?.retry ? `<section class="comparison-section"><div class="section-heading"><div><h2>重讲后分项观察</h2><p>使用同一标准评分，用于比较变化，不追求一次性满分。</p></div>${retryAverage ? `<span class="delta-badge ${retryAverage >= firstAverage ? "positive" : ""}">${retryAverage >= firstAverage ? "+" : ""}${(retryAverage - firstAverage).toFixed(1)}</span>` : ""}</div>${renderMetricRows(session, card, "retry")}<div class="improvement-choice"><fieldset><legend>是否出现可观察改善？</legend><label><input type="radio" name="observableImprovement" value="yes"${checked(session.observableImprovement === true)}><span>是，能指出具体变化</span></label><label><input type="radio" name="observableImprovement" value="no"${checked(session.observableImprovement === false)}><span>否，问题仍明显存在</span></label></fieldset><label class="confirmation-check"><input type="checkbox" data-session-field="migrationRecommended"${checked(session.migrationRecommended)}><span>建议以后用同一话题做跨场景迁移训练</span></label></div></section>` : ""}
-    <div class="action-bar"><button class="button button-ghost" type="button" data-action="navigate" data-view="home">暂时离开</button><button class="button button-primary" type="button" data-action="finish-session">完成训练闭环${icon("check")}</button></div>
-  `;
-  const sidebar = `<section class="side-note"><h3>对比录音</h3>${session.recordingFirstId ? `<div class="audio-slot stacked" data-recording-id="${escapeHtml(session.recordingFirstId)}"><span>正在读取首次录音…</span></div>` : `<p>首次表达未保存录音。</p>`}${session.recordingRetryId ? `<div class="audio-slot stacked" data-recording-id="${escapeHtml(session.recordingRetryId)}"><span>正在读取重讲录音…</span></div>` : ""}</section><section class="side-note"><h3>不得改变</h3><ul><li>不重新调研</li><li>不增加新观点</li><li>不更换题目与结构</li><li>只观察唯一改进目标</li></ul></section>`;
-  return renderStageShell(session, card, body, sidebar);
-}
-
-function renderComplete(session, card) {
-  const firstAverage = scoreAverage(session.selfScores, card.reviewMetricIds);
-  const retryAverage = scoreAverage(session.retryScores, card.reviewMetricIds);
-  const delta = retryAverage - firstAverage;
-  const totalSeconds = Object.values(session.stageDurations ?? {}).reduce((sum, value) => sum + value, 0);
-  return `
-    <div class="completion-page">
-      <div class="completion-mark">${icon("check")}</div>
-      <p class="eyebrow">完整训练闭环已保存</p>
-      <h1>${escapeHtml(card.topicLabel)}</h1>
-      <p class="completion-lead">系统只保存你亲自完成的来源、笔记、表达和复盘，不替你生成学习结论。</p>
-      <div class="completion-summary">
-        <div><span>实际训练时长</span><strong>${formatDuration(totalSeconds)}</strong></div>
-        <div><span>来源记录</span><strong>${session.sources?.length ?? 0}</strong></div>
-        <div><span>重讲变化</span><strong class="${delta > 0 ? "positive-text" : ""}">${delta > 0 ? "+" : ""}${delta.toFixed(1)}</strong></div>
-        <div><span>可观察改善</span><strong>${session.observableImprovement ? "已出现" : "未确认"}</strong></div>
-      </div>
-      <section class="completion-focus"><span>本次唯一改进目标</span><h2>${escapeHtml(session.retryFocus)}</h2><p>${session.migrationRecommended ? "已标记：以后安排同题跨场景迁移。" : "未标记同题迁移。"}</p></section>
-      <div class="recording-compare">
-        <div><h3>第一次表达</h3>${session.recordingFirstId ? `<div class="audio-slot wide" data-recording-id="${escapeHtml(session.recordingFirstId)}"><span>正在读取录音…</span></div>` : `<p>未保存录音</p>`}</div>
-        <div><h3>针对性重讲</h3>${session.recordingRetryId ? `<div class="audio-slot wide" data-recording-id="${escapeHtml(session.recordingRetryId)}"><span>正在读取录音…</span></div>` : `<p>未保存录音</p>`}</div>
-      </div>
-      <div class="completion-actions"><button class="button button-secondary" type="button" data-action="open-history-session" data-session-id="${escapeHtml(session.sessionId)}">查看完整记录</button><button class="button button-primary button-large" type="button" data-action="close-complete">返回今日训练${icon("arrowRight")}</button></div>
-    </div>
-  `;
-}
-
-function renderTraining() {
-  const session = state.activeSession;
-  const card = cardForSession(session);
-  if (!session || !card) {
-    return renderShell(`<section class="empty-state"><div>${icon("alert")}</div><h1>没有可恢复的训练</h1><p>当前题卡可能已被移除，请返回首页重新抽取。</p><button class="button button-primary" type="button" data-action="navigate" data-view="home">返回首页</button></section>`, { title: "训练工作台" });
-  }
-  let content;
-  if (session.stage === "preview") {
-    content = renderTaskPreview(session, card);
-  } else if (["research", "organize"].includes(session.stage)) {
-    content = renderResearch(session, card);
-  } else if (session.stage === "firstDelivery") {
-    content = renderDelivery(session, card);
-  } else if (session.stage === "review") {
-    content = renderReview(session, card);
-  } else if (session.stage === "retry") {
-    content = renderRetry(session, card);
-  } else {
-    content = renderComplete(session, card);
-  }
-  return renderShell(content, { title: "训练工作台" });
-}
-
-function libraryFilteredCards() {
-  const filters = state.libraryFilters;
-  const query = filters.query.trim().toLocaleLowerCase("zh-CN");
-  return TASK_CARDS.filter((card) => !filters.scene || card.scene === filters.scene)
-    .filter((card) => !filters.domain || card.domain === filters.domain)
-    .filter((card) => !filters.difficulty || card.difficulty === Number(filters.difficulty))
-    .filter((card) => filters.favorites !== "yes" || state.favorites.has(card.id))
-    .filter(
-      (card) =>
-        !query ||
-        [card.id, card.topicLabel, card.title, card.audience, card.purpose, card.sceneLabel, card.domainLabel]
-          .join(" ")
-          .toLocaleLowerCase("zh-CN")
-          .includes(query),
-    );
-}
-
-function renderCardItem(card) {
-  const favorite = state.favorites.has(card.id);
-  return `<article class="library-card">
-    <div class="library-card-head"><div class="card-meta"><span class="scene-tag scene-${card.scene}">${escapeHtml(card.sceneLabel)}</span><span class="domain-tag domain-${card.domain}">${escapeHtml(card.domainLabel)}</span></div><button class="icon-button${favorite ? " is-favorite" : ""}" type="button" data-action="toggle-favorite" data-card-id="${card.id}" title="${favorite ? "取消收藏" : "收藏题卡"}" aria-label="${favorite ? "取消收藏" : "收藏"} ${escapeHtml(card.topicLabel)}">${icon(favorite ? "heartFilled" : "heart")}</button></div>
-    <div class="library-card-body"><p>${escapeHtml(card.topicLabel)}</p><h2>${escapeHtml(card.title)}</h2><dl><div><dt>受众</dt><dd>${escapeHtml(card.audience)}</dd></div><div><dt>协议</dt><dd>${escapeHtml(PROTOCOLS[card.protocol].label)} · L${card.difficulty}</dd></div></dl></div>
-    <div class="library-card-actions"><button class="button button-ghost" type="button" data-action="open-card" data-card-id="${card.id}">查看任务</button><button class="button button-secondary" type="button" data-action="start-card" data-card-id="${card.id}">${icon("play")}开始训练</button></div>
-  </article>`;
-}
-
-function renderLibrary() {
-  const cards = libraryFilteredCards();
-  const content = `
-    <div class="page-heading library-heading"><div><p class="eyebrow">版本 ${CARD_BANK_VERSION}</p><h1>场景化题库</h1><p>每张卡都绑定场景、受众、目的、训练协议、检索任务、结构与评价指标。</p></div><div class="library-count"><strong>${cards.length}</strong><span>/ ${TASK_CARDS.length} 张</span></div></div>
-    <section class="filter-bar" aria-label="题库筛选">
-      <label class="search-field">${icon("search")}<input type="search" placeholder="搜索话题、任务或受众" value="${escapeHtml(state.libraryFilters.query)}" data-library-filter="query"></label>
-      <label><span>场景</span><select data-library-filter="scene"><option value="">全部场景</option>${Object.entries(SCENES).map(([id, item]) => `<option value="${id}"${selected(state.libraryFilters.scene, id)}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
-      <label><span>领域</span><select data-library-filter="domain"><option value="">全部领域</option>${Object.entries(DOMAINS).map(([id, item]) => `<option value="${id}"${selected(state.libraryFilters.domain, id)}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
-      <label><span>难度</span><select data-library-filter="difficulty"><option value="">全部难度</option>${[1, 2, 3, 4, 5].map((value) => `<option value="${value}"${selected(state.libraryFilters.difficulty, String(value))}>L${value}</option>`).join("")}</select></label>
-      <label class="favorite-filter"><input type="checkbox" data-library-filter="favorites" value="yes"${checked(state.libraryFilters.favorites === "yes")}>${icon("heart")}<span>只看收藏</span></label>
-    </section>
-    ${cards.length ? `<div class="library-grid">${cards.map(renderCardItem).join("")}</div>` : `<section class="empty-state compact"><div>${icon("search")}</div><h2>没有匹配的题卡</h2><p>调整场景、领域或关键词后再试。</p><button class="button button-secondary" type="button" data-action="clear-library-filters">清除筛选</button></section>`}
-  `;
-  return renderShell(content, { title: "场景题库" });
+  return renderShell(content, { title: "30 课" });
 }
 
 function uniqueProblems() {
@@ -1215,13 +535,54 @@ function renderHistoryItem(session) {
   </article>`;
 }
 
+function legacyRecordTime(record) {
+  return new Date(record.completedAt ?? record.startedAt ?? 0).getTime();
+}
+
+/** 旧版记录的一行：日期、标题、口径说明与结果，只读。 */
+function renderLegacyRow({ date, title, kind, summary }) {
+  return `<article class="history-row legacy-row">
+    <div class="history-date"><strong>${formatDate(date, { day: "2-digit" })}</strong><span>${formatDate(date, { month: "short" })}</span></div>
+    <div class="history-main"><div class="card-meta"><span class="status-badge status-ready">旧版训练</span><span>${escapeHtml(kind)}</span></div><h2>${escapeHtml(title)}</h2></div>
+    <div class="history-summary"><span>${escapeHtml(kind)}</span><strong>${escapeHtml(summary)}</strong></div>
+  </article>`;
+}
+
+/** 旧版实战回合与旧版课程（schemaVersion 1）的只读列表。 */
+function renderLegacyDrillAndLessonLists() {
+  const newestFirst = (left, right) => legacyRecordTime(right) - legacyRecordTime(left);
+  const drills = state.drills.filter((drill) => drill.schemaVersion !== 2).sort(newestFirst);
+  const runs = state.lessonRuns.filter((run) => run.schemaVersion !== 2).sort(newestFirst);
+  const drillRows = drills.map((drill) => {
+    const outcome = drill.status === "completed" ? legacyDrillOutcome(drill) : null;
+    const summary = outcome ? `${outcome.firstPassed}/${outcome.total} → ${outcome.secondPassed}/${outcome.total}` : "—";
+    return renderLegacyRow({ date: drill.completedAt ?? drill.startedAt, title: drill.title ?? drill.cardId, kind: "旧版实战回合", summary });
+  }).join("");
+  const lessonRows = runs.map((run) => renderLegacyRow({
+    date: run.completedAt ?? run.startedAt,
+    title: LEGACY_LESSON_MAP.get(run.scenarioId)?.structure ?? run.scenarioId,
+    kind: "旧版课程",
+    summary: run.status === "completed" ? "已完成" : "未完成",
+  })).join("");
+  return `${drills.length ? `<div class="section-heading legacy-heading"><div><p class="eyebrow">旧版训练</p><h2>旧版实战回合</h2></div><span>${drills.length} 条</span></div><div class="history-list">${drillRows}</div>` : ""}
+    ${runs.length ? `<div class="section-heading legacy-heading"><div><p class="eyebrow">旧版训练</p><h2>旧版课程</h2></div><span>${runs.length} 条</span></div><div class="history-list">${lessonRows}</div>` : ""}`;
+}
+
+/**
+ * 训练历史：新版练习回合在上；旧版记录收进只读折叠区。
+ *
+ * @returns {string} 历史页 HTML
+ */
 function renderHistory() {
   const filtered = filterHistory(state.sessions, state.historyFilters);
   const problems = uniqueProblems();
+  const hasLegacy = state.sessions.length || state.drills.some((drill) => drill.schemaVersion !== 2) || state.lessonRuns.some((run) => run.schemaVersion !== 2);
   const content = `
-    <div class="page-heading"><div><p class="eyebrow">本地训练档案</p><h1>训练历史</h1><p>实战回合记录首轮与重讲的逐项检查、遇到的打断与追问；主题题库记录保留在下方。</p></div><div class="library-count"><strong>${state.drills.length}</strong><span>个实战回合</span></div></div>
-    ${renderDrillHistory(state.drills, { escapeHtml, formatDate }) || `<section class="empty-state"><div>${icon("history")}</div><h2>还没有实战回合</h2><p>完成一次“开口 → 回听 → 重讲”后，记录会出现在这里。</p><button class="button button-primary" type="button" data-action="navigate" data-view="home">开始实战</button></section>`}
-    ${state.sessions.length ? `<div class="section-heading legacy-heading"><div><p class="eyebrow">主题题库</p><h2>主题训练记录</h2></div><span>${filtered.length} / ${state.sessions.length} 条</span></div>` : ""}
+    <div class="page-heading"><div><p class="eyebrow">本地训练档案</p><h1>训练历史</h1><p>练习回合记录首轮与重讲的逐项检查、遇到的打断与追问；旧版训练记录只读保留在下方。</p></div><div class="library-count"><strong>${state.drills.filter((drill) => drill.schemaVersion === 2).length}</strong><span>个练习回合</span></div></div>
+    ${renderDrillHistory(state.drills, { escapeHtml, formatDate }) || `<section class="empty-state"><div>${icon("history")}</div><h2>还没有练习回合</h2><p>学完一课后，完成一次“开口 → 回听 → 重讲”，记录会出现在这里。</p><button class="button button-primary" type="button" data-action="navigate" data-view="home">回到今日训练</button></section>`}
+    ${hasLegacy ? `<details class="legacy-ability legacy-history"><summary>${icon("archive")}旧版训练记录（只读）</summary>
+    ${renderLegacyDrillAndLessonLists()}
+    ${state.sessions.length ? `<div class="section-heading legacy-heading"><div><p class="eyebrow">旧版训练</p><h2>旧版主题训练记录</h2></div><span>${filtered.length} / ${state.sessions.length} 条</span></div>` : ""}
     ${state.sessions.length ? `<details class="history-filters"><summary>${icon("filter")}筛选主题训练记录</summary><div class="filter-grid">
       <label class="search-field">${icon("search")}<input type="search" placeholder="搜索任务或问题" value="${escapeHtml(state.historyFilters.query)}" data-history-filter="query"></label>
       <label><span>场景</span><select data-history-filter="scene"><option value="">全部场景</option>${Object.entries(SCENES).map(([id, item]) => `<option value="${id}"${selected(state.historyFilters.scene, id)}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
@@ -1236,6 +597,7 @@ function renderHistory() {
       <button class="button button-ghost" type="button" data-action="clear-history-filters">清除筛选</button>
     </div></details>
     ${filtered.length ? `<div class="history-list">${filtered.map(renderHistoryItem).join("")}</div>` : `<section class="empty-state"><div>${icon("history")}</div><h2>没有匹配的训练记录</h2><p>调整筛选条件后再试。</p></section>`}` : ""}
+    </details>` : ""}
   `;
   return renderShell(content, { title: "训练历史" });
 }
@@ -1247,14 +609,17 @@ function renderProtocolCoverage(counts) {
 
 function renderAbility() {
   const stats = calculateStats(state.sessions, TASK_CARDS, METRICS);
-  const arenaWeakId = arenaStats(state.drills).weakest;
-  const arenaWeak = arenaWeakId ? CHECKS[arenaWeakId] : null;
+  const weakness = practiceStats(state.drills).weakness;
+  const weakCheck = weakness?.kind === "behavior" ? CHECKS[weakness.id] : null;
+  const weakParadigm = weakness?.kind === "structure" ? PARADIGM_MAP.get(weakness.id) : null;
+  const weakTip = weakCheck?.tip ?? (weakParadigm ? `按“${weakParadigm.structure}”的顺序把每一步都讲到。` : "");
+  const legacyRates = Object.entries(legacyCheckRates(state.drills)).sort((left, right) => left[1].firstRate - right[1].firstRate);
   const metricEntries = Object.entries(stats.metrics).sort((left, right) => left[1].average - right[1].average);
   const content = `
-    <div class="page-heading"><div><p class="eyebrow">能力档案</p><h1>看可观察的行为，不看笼统总分</h1><p>每一项都是回听时能回答“做到 / 没做到”的具体行为。首轮代表冷启动的真实水平，重讲代表改正能力。</p></div><div class="headline-stat"><span>弱项</span><strong>${arenaWeak ? escapeHtml(arenaWeak.label) : "—"}</strong><small>${arenaWeak ? "自适应抽题优先安排" : "完成 3 回合后判断"}</small></div></div>
-    ${renderArenaAbility(state.drills, { escapeHtml, icon })}
-    <section class="focus-band ability-focus"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">下一回合</p><h2>${arenaWeak ? `练「${escapeHtml(arenaWeak.label)}」` : "继续拓展行业和场景"}</h2><p>${arenaWeak ? escapeHtml(arenaWeak.tip) : "自适应抽题会优先选择你还没练过的行业。"}</p></div><button class="button button-primary" type="button" data-action="start-focus">去抽一个场景${icon("arrowRight")}</button></section>
-    ${state.sessions.length ? `<details class="legacy-ability"><summary>${icon("book")}主题题库档案（${state.sessions.length} 条记录，1–5 分自评口径）</summary>
+    <div class="page-heading"><div><p class="eyebrow">能力档案</p><h1>看可观察的行为，不看笼统总分</h1><p>每一项都是回听时能回答“做到 / 没做到”的具体行为。首轮代表冷启动的真实水平，重讲代表改正能力。</p></div><div class="headline-stat"><span>弱项</span><strong>${weakness ? escapeHtml(weaknessLabel(weakness)) : "—"}</strong><small>${weakness ? "抽题优先安排" : "完成 3 回合后判断"}</small></div></div>
+    ${renderPracticeAbility(state.drills, { escapeHtml, icon })}
+    <section class="focus-band ability-focus"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">下一回合</p><h2>${weakness ? `练「${escapeHtml(weaknessLabel(weakness))}」` : "继续覆盖四条线"}</h2><p>${weakness ? escapeHtml(weakTip) : "抽题会按当前阶段的比例覆盖四条线，并优先安排你刚学的结构。"}</p></div><button class="button button-primary" type="button" data-action="navigate" data-view="home">去今日训练${icon("arrowRight")}</button></section>
+    ${state.sessions.length ? `<details class="legacy-ability"><summary>${icon("book")}旧版主题训练档案（只读，1–5 分自评口径，${state.sessions.length} 条记录）</summary>
     <div class="ability-grid">
       <section class="dashboard-section wide"><div class="section-heading"><div><p class="eyebrow">滚动覆盖</p><h2>十类表达场景</h2></div><div class="range-legend"><span><i class="legend-dot seven"></i>7 天</span><span><i class="legend-dot thirty"></i>30 天</span></div></div><div class="dual-coverage">${Object.entries(SCENES).map(([id, scene]) => { const seven = stats.sceneCounts7[id] ?? 0; const thirty = stats.sceneCounts30[id] ?? 0; const max = Math.max(1, ...Object.values(stats.sceneCounts30)); return `<div><span>${escapeHtml(scene.label)}</span><div><progress class="progress-seven" value="${seven}" max="${max}" aria-label="7 天 ${seven} 次"></progress><progress class="progress-thirty" value="${thirty}" max="${max}" aria-label="30 天 ${thirty} 次"></progress></div><strong>${seven} / ${thirty}</strong></div>`; }).join("")}</div></section>
       <section class="dashboard-section"><div class="section-heading"><div><p class="eyebrow">全部完成记录</p><h2>四类训练协议</h2></div></div>${renderProtocolCoverage(stats.protocolCounts)}</section>
@@ -1263,16 +628,17 @@ function renderAbility() {
     <section class="dashboard-section metric-trends"><div class="section-heading"><div><p class="eyebrow">滚动 30 天</p><h2>分项指标趋势</h2></div><span>至少 2 次后用于训练建议</span></div>${metricEntries.length ? `<div class="metric-table">${metricEntries.map(([id, value]) => `<div><div><strong>${escapeHtml(METRICS[id]?.label ?? id)}</strong><small>${value.count} 次观察</small></div><progress value="${value.average}" max="5" aria-label="平均 ${value.average} 分"></progress><span>${value.average}</span><em class="${value.change > 0 ? "positive-text" : value.change < 0 ? "negative-text" : ""}">${value.change > 0 ? "+" : ""}${value.change.toFixed(1)}</em></div>`).join("")}</div>` : `<div class="empty-inline"><p>完成至少两次训练后，这里会显示分项趋势。</p></div>`}</section>
     <section class="dashboard-section problems-section"><div class="section-heading"><div><p class="eyebrow">只识别重复描述</p><h2>反复出现的问题</h2></div></div>${stats.problems.length ? `<div class="problem-list">${stats.problems.map((item) => `<div><span>${escapeHtml(item.problem)}</span><strong>${item.count} 次</strong>${item.count >= 3 ? `<em>建议强化</em>` : ""}</div>`).join("")}</div>` : `<div class="empty-inline"><p>还没有可汇总的重复问题。</p></div>`}</section>
     </details>` : ""}
+    ${legacyRates.length ? `<details class="legacy-ability"><summary>${icon("archive")}旧版实战回合（只读，旧检查项口径）</summary><section class="dashboard-section"><div class="section-heading"><div><p class="eyebrow">旧版训练</p><h2>旧版实战回合做到率</h2></div><span>最近 20 回合</span></div><div class="check-rate-table">${legacyRates.map(([id, entry]) => { const check = LEGACY_CHECKS[id] ?? CHECKS[id]; return `<div><div><strong>${escapeHtml(check?.label ?? id)}</strong><small>${entry.attempts} 次 · ${escapeHtml(check?.question ?? "")}</small></div><div class="rate-bars"><span><i data-rate-width="${entry.firstRate}"></i></span><em>首轮 ${entry.firstRate}%</em><span class="is-second"><i data-rate-width="${entry.secondRate}"></i></span><em>重讲 ${entry.secondRate}%</em></div></div>`; }).join("")}</div></section></details>` : ""}
   `;
   return renderShell(content, { title: "能力档案" });
 }
 
 function renderSettings() {
   const content = `
-    <div class="page-heading"><div><p class="eyebrow">设置</p><h1>训练与本地数据</h1><p>调整日常强度、计时体验、录音保留和数据迁移。</p></div></div>
+    <div class="page-heading"><div><p class="eyebrow">设置</p><h1>训练与本地数据</h1><p>调整当前阶段、计时体验、录音保留和数据迁移。</p></div></div>
     <div class="settings-layout">
-      <section class="settings-section"><div class="settings-head"><div>${icon("target")}</div><span><h2>训练偏好</h2><p>首页默认的回合模式；训练等级只影响主题题库的选题。实战回合的难度随完成量自动提高。</p></span></div>
-        <div class="setting-row range-setting"><label for="level-range"><span>当前训练等级</span><small>L1 熟悉生活题 · L5 多约束迁移</small></label><div><strong id="level-value">L${state.settings.level}</strong><input id="level-range" type="range" min="1" max="5" step="1" value="${state.settings.level}" data-setting="level"></div></div>
+      <section class="settings-section"><div class="settings-head"><div>${icon("target")}</div><span><h2>训练偏好</h2><p>当前阶段决定练习题在四条线之间的比例；题目难度随完成量自动提高。</p></span></div>
+        <div class="setting-row stacked"><div><span>当前阶段</span><small>决定四条线的出题比例，可以随时改。</small></div>${renderStageSelector("setting-stage")}</div>
         <div class="setting-row stacked"><div><span>首页默认模式</span><small>随时可以在开始前临时切换。</small></div>${renderModeSelector(state.settings.defaultMode, "setting-mode")}</div>
       </section>
       <section class="settings-section"><div class="settings-head"><div>${icon("clock")}</div><span><h2>执行体验</h2><p>计时到点只提示，不强制停止。</p></span></div>
@@ -1281,14 +647,25 @@ function renderSettings() {
         ${renderToggle("keepRecordings", "完成后保留录音", "关闭后，本次总结离开时删除两次录音，仅保留文字记录。")}
       </section>
       <section class="settings-section data-section"><div class="settings-head"><div>${icon("archive")}</div><span><h2>本地数据</h2><p>训练笔记与录音默认保存在当前浏览器。</p></span></div>
-        <div class="storage-summary"><div><span>实战回合</span><strong>${state.storage.drillCount ?? state.drills.length}</strong></div><div><span>主题训练</span><strong>${state.storage.sessionCount}</strong></div><div><span>本地录音</span><strong>${state.storage.recordingCount}</strong></div><div><span>录音占用</span><strong>${formatBytes(state.storage.recordingBytes)}</strong></div></div>
+        <div class="storage-summary"><div><span>练习回合</span><strong>${state.drills.filter((drill) => drill.schemaVersion === 2).length}</strong></div><div><span>旧版训练记录</span><strong>${state.storage.sessionCount}</strong></div><div><span>本地录音</span><strong>${state.storage.recordingCount}</strong></div><div><span>录音占用</span><strong>${formatBytes(state.storage.recordingBytes)}</strong></div></div>
         <div class="data-actions"><button class="button button-secondary" type="button" data-action="export-data">${icon("download")}导出 JSON</button><label class="button button-secondary file-button">${icon("upload")}导入 JSON<input type="file" accept="application/json,.json" data-import-file></label>${state.installPrompt ? `<button class="button button-secondary" type="button" data-action="install-app">${icon("download")}安装到设备</button>` : ""}<button class="button button-danger-ghost" type="button" data-action="open-clear-data">${icon("trash")}清除全部本地数据</button></div>
-        <p class="data-note">JSON 导出不包含录音文件。导入会合并训练记录，并覆盖设置与收藏。</p>
+        <p class="data-note">JSON 导出不包含录音文件。导入会合并训练记录并覆盖设置。</p>
       </section>
       <section class="settings-section privacy-section"><div class="settings-head"><div>${icon("info")}</div><span><h2>隐私边界</h2><p>本应用不主动收集行为数据，也不接入广告或分析服务。</p></span></div><p>训练笔记与录音默认仅保存在当前设备的浏览器存储中。静态服务器仍可能处理提供网页所必需的基础访问信息，例如 IP 地址和 User-Agent；具体取决于部署环境。</p><p>麦克风只在你点击录音后请求权限。关闭页面前请先停止录音。</p></section>
     </div>
   `;
   return renderShell(content, { title: "设置" });
+}
+
+/**
+ * “当前阶段”单选组：设置页与首次引导共用，仅 data-action 不同。
+ *
+ * @param {string} action 点击时分发的动作名
+ * @returns {string} 单选组 HTML
+ */
+function renderStageSelector(action) {
+  const current = state.settings.careerStage;
+  return `<div class="segmented" role="radiogroup" aria-label="当前阶段">${CAREER_STAGES.map((id) => `<button type="button" role="radio" aria-checked="${current === id}" tabindex="${current === id ? "0" : "-1"}" class="${current === id ? "is-active" : ""}" data-action="${action}" data-value="${id}"><span>${CAREER_STAGE_LABELS[id].label}</span><small>${CAREER_STAGE_LABELS[id].hint}</small></button>`).join("")}</div>`;
 }
 
 function renderToggle(id, label, description) {
@@ -1299,25 +676,12 @@ function renderModal() {
   if (!state.modal) {
     return "";
   }
-  if (state.modal.type === "swap") {
-    return `<div class="modal-backdrop" data-action="close-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" data-modal-panel><button class="icon-button modal-close" type="button" data-action="close-modal" aria-label="关闭">${icon("x")}</button><p class="eyebrow">本轮仅可换一次</p><h2 id="modal-title">为什么当前题目不适合？</h2><p>原因会作为题卡质量和编排信号保存，不影响连续完成。</p><label class="field"><span>换题原因</span><select data-swap-reason><option value="">请选择</option><option value="已熟悉">已熟悉</option><option value="资料不可得">资料不可得</option><option value="当前不适合">当前不适合</option><option value="题目质量问题">题目质量问题</option><option value="其他">其他</option></select></label><label class="field"><span>补充说明（可选）</span><textarea rows="3" data-swap-note placeholder="简要记录具体原因"></textarea></label><div class="modal-actions"><button class="button button-ghost" type="button" data-action="close-modal">保留当前题</button><button class="button button-primary" type="button" data-action="confirm-swap">记录原因并换题</button></div></section></div>`;
-  }
-  if (state.modal.type === "abandon") {
-    return `<div class="modal-backdrop" data-action="close-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" data-modal-panel><button class="icon-button modal-close" type="button" data-action="close-modal" aria-label="关闭">${icon("x")}</button><p class="eyebrow">如实记录，不惩罚中断</p><h2 id="modal-title">结束本次训练？</h2><p>当前笔记仍会保存为未完成记录，下一次编排会适当降低时长或难度。</p><label class="field"><span>未完成原因</span><select data-abandon-reason><option value="">请选择</option><option value="时间不足">时间不足</option><option value="当前环境不适合">当前环境不适合</option><option value="资料不足">资料不足</option><option value="任务难度不合适">任务难度不合适</option><option value="身体或精力状态">身体或精力状态</option><option value="其他">其他</option></select></label><label class="field"><span>补充说明（可选）</span><textarea rows="3" data-abandon-note></textarea></label><div class="modal-actions"><button class="button button-ghost" type="button" data-action="close-modal">继续训练</button><button class="button button-danger" type="button" data-action="confirm-abandon">结束并保存记录</button></div></section></div>`;
-  }
-  if (state.modal.type === "card") {
-    const card = cardMap.get(state.modal.cardId);
-    if (!card) {
-      return "";
-    }
-    return `<div class="modal-backdrop" data-action="close-modal"><section class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="modal-title" data-modal-panel><button class="icon-button modal-close" type="button" data-action="close-modal" aria-label="关闭">${icon("x")}</button><div class="card-meta"><span class="scene-tag scene-${card.scene}">${escapeHtml(card.sceneLabel)}</span><span class="domain-tag domain-${card.domain}">${escapeHtml(card.domainLabel)}</span><span>L${card.difficulty}</span><span>${escapeHtml(PROTOCOLS[card.protocol].label)}</span></div><p class="topic-label">${escapeHtml(card.topicLabel)}</p><h2 id="modal-title">${escapeHtml(card.title)}</h2><div class="modal-facts"><div><span>目标受众</span><p>${escapeHtml(card.audience)}</p></div><div><span>沟通目的</span><p>${escapeHtml(card.purpose)}</p></div><div><span>主要能力</span><p>${escapeHtml(card.primarySkill)}</p></div><div><span>预计时长</span><p>${card.estimatedMinutes} 分钟</p></div></div><section><h3>完成标准</h3><ul class="check-list compact">${card.completionCriteria.map((item) => `<li>${icon("check")}<span>${escapeHtml(item)}</span></li>`).join("")}</ul></section><p class="modal-boundary">具体检索问题和推荐结构将在对应训练阶段开放。</p><div class="modal-actions"><button class="button button-ghost" type="button" data-action="toggle-favorite" data-card-id="${card.id}">${icon(state.favorites.has(card.id) ? "heartFilled" : "heart")}${state.favorites.has(card.id) ? "取消收藏" : "收藏题卡"}</button><button class="button button-primary" type="button" data-action="start-card" data-card-id="${card.id}">${icon("play")}开始这张题卡</button></div></section></div>`;
-  }
   if (state.modal.type === "history") {
-    const session = state.sessions.find((item) => item.sessionId === state.modal.sessionId) ?? (state.activeSession?.sessionId === state.modal.sessionId ? state.activeSession : null);
+    const session = state.sessions.find((item) => item.sessionId === state.modal.sessionId);
     return session ? renderHistoryModal(session) : "";
   }
   if (state.modal.type === "clear") {
-    return `<div class="modal-backdrop" data-action="close-modal"><section class="modal" role="alertdialog" aria-modal="true" aria-labelledby="modal-title" data-modal-panel><button class="icon-button modal-close" type="button" data-action="close-modal" aria-label="关闭">${icon("x")}</button><p class="eyebrow danger-text">不可撤销</p><h2 id="modal-title">清除全部本地数据？</h2><p>训练记录、当前进度、收藏、设置和本地录音都会从这个浏览器中删除。</p><label class="field"><span>输入“清除”确认</span><input type="text" data-clear-confirm autocomplete="off"></label><div class="modal-actions"><button class="button button-ghost" type="button" data-action="close-modal">取消</button><button class="button button-danger" type="button" data-action="confirm-clear-data">永久清除</button></div></section></div>`;
+    return `<div class="modal-backdrop" data-action="close-modal"><section class="modal" role="alertdialog" aria-modal="true" aria-labelledby="modal-title" data-modal-panel><button class="icon-button modal-close" type="button" data-action="close-modal" aria-label="关闭">${icon("x")}</button><p class="eyebrow danger-text">不可撤销</p><h2 id="modal-title">清除全部本地数据？</h2><p>训练记录、课程进度、当前进度、设置和本地录音都会从这个浏览器中删除。</p><label class="field"><span>输入“清除”确认</span><input type="text" data-clear-confirm autocomplete="off"></label><div class="modal-actions"><button class="button button-ghost" type="button" data-action="close-modal">取消</button><button class="button button-danger" type="button" data-action="confirm-clear-data">永久清除</button></div></section></div>`;
   }
   return "";
 }
@@ -1341,11 +705,12 @@ function renderHistoryModal(session) {
     ${Object.keys(session.userNotes ?? {}).length ? `<section class="record-section"><h3>整理笔记</h3><div class="record-notes">${Object.entries(session.userNotes).filter(([, value]) => value?.trim()).map(([key, value]) => `<div><strong>${escapeHtml(key)}</strong><p>${escapeHtml(value)}</p></div>`).join("")}</div></section>` : ""}
     ${card && session.completionStatus === "completed" ? `<section class="record-section"><h3>分项自评对比</h3><div class="table-scroll"><table><thead><tr><th>指标</th><th>首次</th><th>重讲</th></tr></thead><tbody>${scoreRows}</tbody></table></div></section>` : ""}
     <section class="record-section"><h3>录音对比</h3><div class="recording-compare"><div><h4>第一次表达</h4>${session.recordingFirstId ? `<div class="audio-slot wide" data-recording-id="${escapeHtml(session.recordingFirstId)}"><span>正在读取录音…</span></div>` : `<p>未保留录音</p>`}</div><div><h4>针对性重讲</h4>${session.recordingRetryId ? `<div class="audio-slot wide" data-recording-id="${escapeHtml(session.recordingRetryId)}"><span>正在读取录音…</span></div>` : `<p>未保留录音</p>`}</div></div></section>
-    <div class="modal-actions"><button class="button button-secondary" type="button" data-action="close-modal">关闭</button>${card ? `<button class="button button-primary" type="button" data-action="start-card" data-card-id="${card.id}">${icon("rotate")}再练这张题卡</button>` : ""}</div></section></div>`;
+    <div class="modal-actions"><button class="button button-secondary" type="button" data-action="close-modal">关闭</button></div></section></div>`;
 }
 
+/** 首次引导：训练目标、怎么练、选择当前阶段。 */
 function renderOnboarding() {
-  return `<div class="modal-backdrop onboarding-backdrop"><section class="modal onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" data-modal-panel><img src="/icons/icon.svg" alt="" width="58" height="58"><p class="eyebrow">首次使用</p><h2 id="onboarding-title">先模仿结构，再上场实战</h2><div class="principle-list"><div><span>01</span><p><strong>学习模式：先学会说</strong>每一课拆解一个场景的示范回答，讲清每一句为什么这样说；然后收起示范复述、自查、再讲，最后换一个行业迁移。</p></div><div><span>02</span><p><strong>实践模式：再上场</strong>18 个行业的真实场景，限时开口，讲到一半会被打断，重讲前会被追问。</p></div><div><span>03</span><p><strong>只判断“做到 / 没做到”</strong>不打笼统分数，拿不准就算没做到。数据只留在当前设备。</p></div></div><div class="onboarding-choice"><span>首页默认训练模式</span>${renderModeSelector(state.settings.defaultMode, "onboarding-mode")}</div><button class="button button-primary button-large" type="button" data-action="complete-onboarding">从学习模式开始${icon("arrowRight")}</button></section></div>`;
+  return `<div class="modal-backdrop onboarding-backdrop"><section class="modal onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" data-modal-panel><img src="/icons/icon.svg" alt="" width="58" height="58"><p class="eyebrow">首次使用</p><h2 id="onboarding-title">从不会开口，到能说会道</h2><div class="principle-list"><div><span>01</span><p><strong>训练目标</strong>从“不知道怎么开口”练到“能说会道”，终点是能带团队、见投资人、对外讲清楚一件事的创业者。</p></div><div><span>02</span><p><strong>怎么练</strong>先学一种表达结构（共 30 课），再在学术、生活、转化、创业四条线的真实场合里限时开口、被打断、回听自查、重讲。</p></div><div><span>03</span><p><strong>选择当前阶段</strong>它决定四条线的出题比例，之后可以在设置里随时修改。数据只留在当前设备。</p></div></div><div class="onboarding-choice"><span>当前阶段</span>${renderStageSelector("onboarding-stage")}</div><button class="button button-primary button-large" type="button" data-action="complete-onboarding">开始训练${icon("arrowRight")}</button></section></div>`;
 }
 
 function render() {
@@ -1360,13 +725,11 @@ function render() {
     root.innerHTML = renderHome();
     applyTopicDrawMotion();
   } else if (view === "drill") {
-    root.innerHTML = renderShell(arena.renderWorkspace(), { title: "实战回合" });
+    root.innerHTML = renderShell(arena.renderWorkspace(), { title: "练习回合" });
   } else if (view === "lesson") {
-    root.innerHTML = renderShell(lessons.renderWorkspace(), { title: "学习模式" });
-  } else if (view === "train") {
-    root.innerHTML = renderTraining();
-  } else if (view === "library") {
-    root.innerHTML = renderLibrary();
+    root.innerHTML = renderShell(lessons.renderWorkspace(), { title: "学一课" });
+  } else if (view === "lessons") {
+    root.innerHTML = renderLessonsPage();
   } else if (view === "history") {
     root.innerHTML = renderHistory();
   } else if (view === "ability") {
@@ -1379,7 +742,6 @@ function render() {
   arena.afterRender();
   lessons.afterRender();
   applyRateBars(root);
-  updateClock();
   const modal = root.querySelector("[data-modal-panel]");
   const shell = root.querySelector(".app-shell");
   const skipLink = document.querySelector(".skip-link");
@@ -1450,33 +812,6 @@ async function hydrateAudioPlayers(version) {
   );
 }
 
-function updateClock() {
-  const session = state.activeSession;
-  if (!session?.timer || state.view !== "train" || ["preview", "complete"].includes(session.stage)) {
-    return;
-  }
-  const remaining = timerRemaining(session.timer);
-  const elapsed = currentElapsed(session.timer);
-  const text = root.querySelector("[data-timer-text]");
-  const progress = root.querySelector("[data-timer-progress]");
-  if (text) {
-    text.textContent = `${remaining < 0 ? "+" : ""}${formatDuration(remaining)}`;
-  }
-  if (progress) {
-    progress.max = Math.max(session.timer.durationSeconds, elapsed, 1);
-    progress.value = Math.min(elapsed, progress.max);
-  }
-  root.querySelector(".stage-timer")?.classList.toggle("is-over", remaining < 0);
-  if (remaining <= 0 && session.timer.runningSince && !session.timer.notifiedAt) {
-    session.timer.notifiedAt = Date.now();
-    scheduleActiveSave();
-    if (state.settings.soundEnabled) {
-      playGentleTone();
-    }
-    showToast("目标时间已到，请完成当前句并自然收束。", "default");
-  }
-}
-
 function playGentleTone() {
   try {
     const AudioContext = window.AudioContext ?? window.webkitAudioContext;
@@ -1497,39 +832,30 @@ function playGentleTone() {
   }
 }
 
-async function startNewSession(card, options = {}) {
-  if (state.activeSession && state.activeSession.completionStatus === "in_progress") {
-    state.modal = { type: "abandon", pendingCardId: card.id };
-    render();
-    showToast("先结束当前训练，再开始新题。", "danger");
-    return;
-  }
-  const nextSession = createSession(card, {
-    mode: options.mode ?? state.homeMode,
-    selectionReason: options.selectionReason ?? "指定题卡",
-    annualPlanDate: options.annualPlanDate,
-    annualPlanDayNumber: options.annualPlanDayNumber,
-  });
-  await saveActiveNow(nextSession);
-  state.activeSession = nextSession;
-  navigate("train");
-}
-
 function prefersReducedMotion() {
   return state.settings.reducedMotion || Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
 }
 
-async function runTopicDraw({ requestedScene = state.homeScene, mode = state.homeMode } = {}) {
-  const selection = selectArenaCard({ drills: state.drills, family: requestedScene || "", learned: learnedScenarios(state.lessonRuns) });
-  const sequence = createDrawSequence({
-    cards: ARENA_CARDS,
-    winner: selection.card,
-    requestedScene: requestedScene || null,
+/**
+ * 首页抽题：从已学范式中按阶段比例、弱项与复练计划选一道题，轮转 5 秒后定格。
+ *
+ * @param {{ mode?: string }} options 本次抽题对应的回合模式
+ */
+async function runTopicDraw({ mode = state.homeMode } = {}) {
+  const selection = selectPracticeCard({
+    drills: state.drills,
+    learned: learnedParadigms(state.lessonRuns),
+    recent: recentlyLearned(state.lessonRuns),
+    careerStage: state.settings.careerStage,
   });
+  if (!selection) {
+    showToast("先学完第 1 课，练习题才会出现。", "danger");
+    return;
+  }
+  const sequence = drawSequence({ cards: PRACTICE_CARDS, winner: selection.card });
   const reducedMotion = prefersReducedMotion();
   const revision = ++topicDrawRevision;
   state.topicDraw = {
-    scene: requestedScene,
     mode,
     status: reducedMotion ? "settled" : "spinning",
     startedAt: performance.now(),
@@ -1540,29 +866,48 @@ async function runTopicDraw({ requestedScene = state.homeScene, mode = state.hom
     revisitOf: selection.revisitOf,
     avoidPressures: selection.avoidPressures,
   };
-  state.pendingAnnouncement = reducedMotion ? `已抽中${selection.card.title}` : "场景开始轮转";
+  state.pendingAnnouncement = reducedMotion ? `已抽中${selection.card.title}` : "题目开始轮转";
   render();
   if (reducedMotion) return;
   await new Promise((resolve) => setTimeout(resolve, TOPIC_DRAW_DURATION_MS));
-  if (revision !== topicDrawRevision || state.homeScene !== requestedScene || state.homeMode !== mode) return;
+  if (revision !== topicDrawRevision || state.homeMode !== mode) return;
   state.topicDraw = { ...state.topicDraw, status: "settled" };
   state.pendingAnnouncement = `已抽中${selection.card.title}`;
   render();
 }
 
-/** 学完一课后直接实践同一场景：换一个示范和迁移都没用过的行业。 */
-async function practiceScenario(scenarioId) {
-  const lastRun = [...state.lessonRuns].reverse().find((run) => run.scenarioId === scenarioId);
-  const usedCards = new Set([lastRun?.exampleCardId, lastRun?.transferCardId]);
-  const cards = ARENA_CARDS.filter((card) => card.scenarioId === scenarioId && !usedCards.has(card.id));
-  const selection = selectArenaCard({ cards, drills: state.drills });
-  await updateSetting("homeTrack", "practice");
-  await arena.startDrill(selection.card, { mode: state.homeMode, selectionReason: "学完立即实践 · 换一个行业、没有提示、会被打断" });
+/** 首页独立的复练入口：直接开始最早到期的一张，不经过抽题。 */
+async function startRevisit() {
+  const revisit = dueRevisits(state.drills)[0];
+  if (!revisit) return;
+  const selection = revisitSelection(revisit);
+  if (!selection.card) return;
+  resetTopicDraw();
+  await arena.startDrill(selection.card, {
+    mode: state.homeMode,
+    selectionReason: selection.reason,
+    revisitOf: selection.revisitOf,
+    avoidPressures: selection.avoidPressures,
+  });
+}
+
+/**
+ * 学完一课后直接用该范式练一回合：避开这课迁移步骤用过的题卡。
+ *
+ * @param {string} paradigmId 刚学完的范式 ID
+ */
+async function practiceParadigm(paradigmId) {
+  const lastRun = [...state.lessonRuns].reverse().find((run) => run.schemaVersion === 2 && run.paradigmId === paradigmId);
+  const cards = PRACTICE_CARDS.filter((card) => card.paradigmId === paradigmId && card.id !== lastRun?.transferCardId);
+  const selection = selectPracticeCard({ cards, drills: state.drills, learned: new Set([paradigmId]), careerStage: state.settings.careerStage });
+  if (!selection) return;
+  resetTopicDraw();
+  await arena.startDrill(selection.card, { mode: state.homeMode, selectionReason: "学完立即练习 · 换一个语境、没有提示、会被打断" });
 }
 
 async function startDrawnTopic() {
   const draw = currentTopicDraw();
-  const card = draw?.status === "settled" ? ARENA_CARD_MAP.get(draw.winnerId) : null;
+  const card = draw?.status === "settled" ? PRACTICE_CARD_MAP.get(draw.winnerId) : null;
   if (!card) {
     await runTopicDraw();
     return;
@@ -1574,376 +919,6 @@ async function startDrawnTopic() {
     revisitOf: draw.revisitOf,
     avoidPressures: draw.avoidPressures,
   });
-}
-
-async function skipSensitiveTask() {
-  if (recordingBusy()) {
-    showToast("录音仍在处理，请稍候。", "danger");
-    return;
-  }
-  const current = state.activeSession;
-  const currentCard = cardForSession(current);
-  if (!current || current.stage !== "preview" || !cardIsSensitive(currentCard)) {
-    return;
-  }
-  const skippedIds = [...new Set([...(current.sensitiveSkippedCardIds ?? []), current.taskCardId])];
-  let nextCard;
-  let selectionReason;
-  let annualPlanDate = null;
-  let annualPlanDayNumber = null;
-  if (current.annualPlanDate || current.selectionReason?.startsWith("年度固定计划")) {
-    annualPlanDate = current.annualPlanDate
-      || current.selectionReason.match(/\d{4}-\d{2}-\d{2}/)?.[0]
-      || dateKey(current.startedAt);
-    const plan = annualPlanForDate(annualPlanDate);
-    const entry = annualPlanAlternative(plan, current.taskCardId, skippedIds);
-    annualPlanDayNumber = current.annualPlanDayNumber
-      ?? plan.find((item) => item.cardId === current.taskCardId)?.dayNumber
-      ?? entry?.dayNumber
-      ?? null;
-    nextCard = entry?.card;
-    selectionReason = entry
-      ? `年度固定计划 · 自愿跳过敏感任务后的替代题 · 原第 ${annualPlanDayNumber} / 365 题 · ${annualPlanDate}`
-      : "";
-  } else {
-    const result = selectTask({
-      cards: TASK_CARDS,
-      history: state.sessions,
-      settings: state.settings,
-      requestedScene: state.homeScene || null,
-      excludedIds: skippedIds,
-    });
-    nextCard = result.card;
-    selectionReason = `${result.reason} · 自愿跳过敏感任务后的替代题`;
-  }
-  if (!nextCard) {
-    showToast("暂时没有其他可用题卡，请返回题库选择。", "danger");
-    return;
-  }
-  const nextSession = createSession(nextCard, {
-    mode: current.mode,
-    selectionReason,
-    swapUsed: current.swapUsed,
-    sensitiveSkipCount: (current.sensitiveSkipCount ?? 0) + 1,
-    sensitiveSkippedCardIds: skippedIds,
-    annualPlanDate,
-    annualPlanDayNumber,
-  });
-  await saveActiveNow(nextSession);
-  state.activeSession = nextSession;
-  render();
-  showToast("已立即换题；无需说明原因，也未占用普通换题额度。", "default");
-}
-
-async function swapCurrentTask() {
-  if (recordingBusy()) {
-    showToast("录音仍在处理，请稍候。", "danger");
-    return;
-  }
-  const reasonSelect = root.querySelector("[data-swap-reason]");
-  const note = root.querySelector("[data-swap-note]")?.value.trim();
-  const reason = reasonSelect?.value;
-  if (!reason) {
-    showToast("请选择换题原因。", "danger");
-    reasonSelect?.focus();
-    return;
-  }
-  const current = state.activeSession;
-  const skipped = {
-    ...current,
-    completionStatus: "skipped",
-    completedAt: new Date().toISOString(),
-    skipReason: note ? `${reason}：${note}` : reason,
-  };
-  cancelScheduledActiveSave();
-  await activeSaveTail;
-  const archived = await archiveSessionWithoutRecordings(skipped, {
-    clearActive: true,
-    retention: "discarded_incomplete",
-  });
-  state.sessions.push(archived);
-  const result = selectTask({
-    cards: TASK_CARDS,
-    history: state.sessions,
-    settings: state.settings,
-    excludedIds: [...new Set([current.taskCardId, ...(current.sensitiveSkippedCardIds ?? [])])],
-  });
-  state.activeSession = createSession(result.card, {
-    mode: current.mode,
-    selectionReason: result.reason,
-    swapUsed: true,
-  });
-  state.modal = null;
-  state.modalOpener = null;
-  await saveActiveNow(state.activeSession);
-  render();
-  showToast("已记录原因并更换题目。", "default");
-}
-
-async function abandonCurrent() {
-  if (recordingBusy()) {
-    showToast("录音仍在处理，请稍候。", "danger");
-    return;
-  }
-  const reasonSelect = root.querySelector("[data-abandon-reason]");
-  const note = root.querySelector("[data-abandon-note]")?.value.trim();
-  const reason = reasonSelect?.value;
-  if (!reason) {
-    showToast("请选择未完成原因。", "danger");
-    reasonSelect?.focus();
-    return;
-  }
-  const pendingCardId = state.modal?.pendingCardId;
-  const abandoned = {
-    ...state.activeSession,
-    completionStatus: "abandoned",
-    completedAt: new Date().toISOString(),
-    skipReason: note ? `${reason}：${note}` : reason,
-  };
-  cancelScheduledActiveSave();
-  await activeSaveTail;
-  const archived = await archiveSessionWithoutRecordings(abandoned, {
-    clearActive: true,
-    retention: "discarded_incomplete",
-  });
-  state.sessions.push(archived);
-  state.activeSession = null;
-  state.modal = null;
-  state.modalOpener = null;
-  state.storage = await storageSummary();
-  if (pendingCardId && cardMap.has(pendingCardId)) {
-    await startNewSession(cardMap.get(pendingCardId));
-  } else {
-    navigate("home");
-  }
-}
-
-function requestStageFocus(session) {
-  state.pendingFocus = { type: "main" };
-  state.pendingAnnouncement = `已进入${stageLabel(session.protocol, session.stage)}阶段`;
-}
-
-async function advanceCurrentStage() {
-  if (recordingBusy()) {
-    showToast("请先停止录音并等待保存完成。", "danger");
-    return;
-  }
-  const session = state.activeSession;
-  const card = cardForSession(session);
-  const validation = validateStage(session, card);
-  if (!validation.valid) {
-    showToast(validation.message, "danger");
-    return;
-  }
-  state.activeSession = advanceStage(session);
-  requestStageFocus(state.activeSession);
-  await saveActiveNow(state.activeSession);
-  render();
-  window.scrollTo({ top: 0, behavior: state.settings.reducedMotion || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
-}
-
-async function finishSession() {
-  if (recordingBusy()) {
-    showToast("请先停止录音并等待保存完成。", "danger");
-    return;
-  }
-  const session = state.activeSession;
-  const card = cardForSession(session);
-  const validation = validateStage(session, card);
-  if (!validation.valid) {
-    showToast(validation.message, "danger");
-    return;
-  }
-  const completed = advanceStage(session);
-  completed.completionStatus = "completed";
-  completed.completedAt = new Date().toISOString();
-  completed.retryCompletedWithoutRecording = Boolean(completed.recordingUnavailable?.retry);
-  cancelScheduledActiveSave();
-  await activeSaveTail;
-  try {
-    await saveCompletedSession(completed);
-  } catch (error) {
-    showToast(error?.message || "完成记录保存失败，请重试。", "danger");
-    return;
-  }
-  state.activeSession = completed;
-  requestStageFocus(completed);
-  const existingIndex = state.sessions.findIndex((item) => item.sessionId === completed.sessionId);
-  if (existingIndex >= 0) {
-    state.sessions[existingIndex] = completed;
-  } else {
-    state.sessions.push(completed);
-  }
-  state.storage = await storageSummary();
-  render();
-  window.scrollTo({ top: 0, behavior: "auto" });
-}
-
-async function closeCompletedSession() {
-  if (recordingBusy()) {
-    showToast("录音仍在保存，请稍候。", "danger");
-    return;
-  }
-  cancelScheduledActiveSave();
-  await activeSaveTail;
-  const session = state.activeSession;
-  if (session && !state.settings.keepRecordings) {
-    const stripped = await archiveSessionWithoutRecordings(session, {
-      clearActive: true,
-      retention: "discarded_by_setting",
-    });
-    const index = state.sessions.findIndex((item) => item.sessionId === stripped.sessionId);
-    if (index >= 0) {
-      state.sessions[index] = stripped;
-    }
-  } else {
-    await clearActiveSession();
-  }
-  state.activeSession = null;
-  state.storage = await storageSummary();
-  navigate("home");
-}
-
-function stopMediaStream(stream) {
-  stream?.getTracks().forEach((track) => track.stop());
-}
-
-async function startRecording(slot) {
-  if (state.recordingRuntime) {
-    return;
-  }
-  const session = state.activeSession;
-  if (!session || !["first", "retry"].includes(slot)) {
-    showToast("当前训练状态无法开始录音。", "danger");
-    return;
-  }
-  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-    showToast("当前浏览器不支持本地录音，请勾选设备无法录音。", "danger");
-    return;
-  }
-  let stream = null;
-  let recorder = null;
-  const runtime = {
-    slot,
-    recorder: null,
-    stream: null,
-    chunks: [],
-    sessionId: session.sessionId,
-    status: "requesting",
-    cancelled: false,
-  };
-  state.recordingRuntime = runtime;
-  render();
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    runtime.stream = stream;
-    if (state.recordingRuntime !== runtime || state.activeSession?.sessionId !== session.sessionId) {
-      throw new Error("当前训练已变化");
-    }
-    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-    const mimeType = candidates.find((type) => MediaRecorder.isTypeSupported(type));
-    recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-    const chunks = runtime.chunks;
-    runtime.recorder = recorder;
-    runtime.status = "starting";
-    recorder.addEventListener("dataavailable", (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
-      }
-    });
-    recorder.addEventListener("stop", async () => {
-      let message = "";
-      let tone = "default";
-      try {
-        if (runtime.cancelled) {
-          return;
-        }
-        runtime.status = "saving";
-        const current = state.activeSession;
-        if (current?.sessionId !== runtime.sessionId) {
-          throw new Error("当前训练已变化，录音未保存");
-        }
-        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-        if (blob.size === 0) {
-          throw new Error("录音内容为空");
-        }
-        const recordingId = `${runtime.sessionId}-${slot}-${Date.now()}`;
-        cancelScheduledActiveSave();
-        await activeSaveTail;
-        const nextSession = await replaceActiveSessionRecording({
-          session: current,
-          slot,
-          recordingId,
-          blob,
-        });
-        if (state.activeSession?.sessionId !== runtime.sessionId) {
-          throw new Error("当前训练已变化，录音未连接到进度");
-        }
-        state.activeSession = nextSession;
-        state.storage = await storageSummary();
-        message = "录音已保存在当前设备。";
-      } catch (error) {
-        tone = "danger";
-        message = error?.message === "录音内容为空" ? "没有检测到可保存的录音，请重新尝试。" : "录音保存失败，请重新尝试。";
-      } finally {
-        stopMediaStream(stream);
-        if (state.recordingRuntime === runtime) {
-          state.recordingRuntime = null;
-        }
-        render();
-        if (message) {
-          showToast(message, tone);
-        }
-      }
-    });
-    if (!state.activeSession.timer?.runningSince) {
-      const timedSession = toggleTimer(state.activeSession);
-      await saveActiveNow(timedSession);
-      state.activeSession = timedSession;
-    }
-    recorder.start(250);
-    runtime.status = "recording";
-    render();
-  } catch (error) {
-    if (runtime) {
-      runtime.cancelled = true;
-    }
-    if (recorder?.state === "recording") {
-      try {
-        recorder.stop();
-      } catch {
-        // The stream is stopped below even if the recorder cannot transition cleanly.
-      }
-    }
-    stopMediaStream(stream);
-    if (state.recordingRuntime === runtime) {
-      state.recordingRuntime = null;
-    }
-    render();
-    showToast(error?.name === "NotAllowedError" ? "未获得麦克风权限。你可以调整权限后重试。" : "无法启动录音，请检查麦克风。", "danger");
-  }
-}
-
-function stopRecording() {
-  const runtime = state.recordingRuntime;
-  if (!runtime || runtime.recorder.state !== "recording") {
-    return;
-  }
-  runtime.status = "saving";
-  runtime.recorder.stop();
-  render();
-}
-
-async function toggleFavorite(cardId) {
-  const favorites = new Set(state.favorites);
-  if (favorites.has(cardId)) {
-    favorites.delete(cardId);
-  } else {
-    favorites.add(cardId);
-  }
-  await saveFavorites(favorites);
-  state.favorites = favorites;
-  render();
 }
 
 function openModal(modal, opener = document.activeElement) {
@@ -1975,7 +950,6 @@ async function updateSetting(id, value) {
 }
 
 async function exportData() {
-  await flushScheduledActiveSave();
   const data = await exportLocalData();
   const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -1992,34 +966,17 @@ async function exportData() {
 async function importData(file) {
   try {
     const data = JSON.parse(await file.text());
-    await flushScheduledActiveSave();
     await importLocalData(data);
-    [state.settings, state.sessions, state.activeSession, state.favorites, state.storage, state.drills, state.activeDrill, state.lessonRuns, state.activeLesson] = await Promise.all([
-      loadSettings(),
-      loadSessions(),
-      loadActiveSession(),
-      loadFavorites(),
-      storageSummary(),
-      loadDrills(),
-      loadActiveDrill(),
-      loadLessonRuns(),
-      loadActiveLesson(),
-    ]);
-    state.homeMode = state.settings.defaultMode;
+    // 导入的旧版进行中训练立即归档，避免旧流程卡在首页
+    const archivedLegacy = await archiveLegacyInProgress().catch(() => 0);
+    await loadLocalState();
+    resetTopicDraw();
     applySettings();
     render();
-    showToast("数据导入完成。", "default");
+    showToast(archivedLegacy ? "数据导入完成，旧版训练的进行中进度已归档到历史。" : "数据导入完成。", "default");
   } catch (error) {
     showToast(error.message || "数据导入失败。", "danger");
   }
-}
-
-/** 能力页“去抽一个场景”：自适应抽题本身就会优先选择弱项场景。 */
-async function startFocusTraining() {
-  state.homeScene = "";
-  resetTopicDraw();
-  navigate("home");
-  await runTopicDraw();
 }
 
 root.addEventListener("click", async (event) => {
@@ -2046,108 +1003,46 @@ root.addEventListener("click", async (event) => {
     await arena.handleAction(action, control);
   } else if (action.startsWith("lesson-")) {
     await lessons.handleAction(action, control);
-  } else if (action === "home-track") {
-    await updateSetting("homeTrack", control.dataset.value);
-    resetTopicDraw();
-    render();
   } else if (action === "resume-drill") {
     navigate("drill");
+  } else if (action === "resume-lesson") {
+    navigate("lesson");
+  } else if (action === "start-revisit") {
+    await startRevisit();
+  } else if (action === "setting-stage" || action === "onboarding-stage") {
+    await updateSetting("careerStage", control.dataset.value);
+    resetTopicDraw();
+    // 重渲染后把焦点还给同一个选项，方向键切换时不丢焦点
+    state.pendingFocus = { type: "control", descriptor: describeControl(control) };
+    render();
   } else if (action === "navigate") {
     navigate(control.dataset.view);
   } else if (action === "home-mode") {
     if (state.homeMode !== control.dataset.value) resetTopicDraw();
     state.homeMode = control.dataset.value;
+    // 与阶段选择一致：重渲染后把焦点还给同一个选项，方向键切换时不丢焦点
+    state.pendingFocus = { type: "control", descriptor: describeControl(control) };
     render();
-  } else if (action === "setting-mode" || action === "onboarding-mode") {
-    const onboardingMode = action === "onboarding-mode";
+  } else if (action === "setting-mode") {
     await updateSetting("defaultMode", control.dataset.value);
-    if (onboardingMode) {
-      state.pendingFocus = { type: "control", descriptor: describeControl(control) };
-    }
+    state.pendingFocus = { type: "control", descriptor: describeControl(control) };
     render();
   } else if (action === "explore-topics") {
-    await runTopicDraw();
+    // 抽题动画持续 5 秒，不能占住互斥锁，否则期间其他操作都会被吞掉
+    void runTopicDraw().catch((error) => showToast(error?.message || "抽题失败，请重试。", "danger"));
   } else if (action === "start-home") {
     if (currentTopicDraw()?.status !== "settled") {
       void runTopicDraw().catch((error) => showToast(error?.message || "抽题失败，请重试。", "danger"));
     } else {
       await startDrawnTopic();
     }
-  } else if (action === "resume-session") {
-    navigate("train");
-  } else if (action === "start-training") {
-    const nextSession = startTraining(state.activeSession);
-    await saveActiveNow(nextSession);
-    state.activeSession = nextSession;
-    requestStageFocus(nextSession);
-    render();
-  } else if (action === "open-swap") {
-    if (!state.activeSession?.swapUsed) {
-      openModal({ type: "swap" }, control);
-    }
-  } else if (action === "skip-sensitive-task") {
-    await skipSensitiveTask();
-  } else if (action === "confirm-swap") {
-    await swapCurrentTask();
-  } else if (action === "open-abandon") {
-    if (recordingBusy()) {
-      showToast("请先停止录音并等待保存完成。", "danger");
-    } else {
-      openModal({ type: "abandon" }, control);
-    }
-  } else if (action === "confirm-abandon") {
-    await abandonCurrent();
   } else if (action === "close-modal") {
     closeModal(event);
-  } else if (action === "toggle-timer") {
-    updateActive((session) => toggleTimer(session), { render: true });
-  } else if (action === "extend-timer") {
-    updateActive((session) => extendTimer(session), { render: true });
-    showToast("本阶段已延长 5 分钟，并记录延期。", "default");
-  } else if (action === "add-source") {
-    updateActive((session) => ({ ...session, sources: [...(session.sources ?? []), { name: "", url: "", support: "", kind: "fact" }] }), { render: true, markNotes: true });
-  } else if (action === "remove-source") {
-    const index = Number(control.dataset.index);
-    updateActive((session) => ({ ...session, sources: session.sources.filter((_, itemIndex) => itemIndex !== index) }), { render: true, markNotes: true });
-  } else if (action === "unlock-help") {
-    updateActive((session) => ({ ...session, helpLevels: { ...(session.helpLevels ?? {}), [session.stage]: Math.min(6, (session.helpLevels?.[session.stage] ?? 0) + 1) } }), { render: true });
-  } else if (action === "advance-stage") {
-    await advanceCurrentStage();
-  } else if (action === "start-recording") {
-    await startRecording(control.dataset.slot);
-  } else if (action === "stop-recording") {
-    stopRecording();
-  } else if (action === "reveal-feedback") {
-    const validation = validateStage(state.activeSession, cardForSession());
-    if (!validation.valid) {
-      showToast(validation.message, "danger");
-    } else {
-      updateActive((session) => ({ ...session, feedbackRevealed: true }), { render: true });
-    }
-  } else if (action === "finish-session") {
-    await finishSession();
-  } else if (action === "close-complete") {
-    await closeCompletedSession();
-  } else if (action === "toggle-favorite") {
-    await toggleFavorite(control.dataset.cardId);
-  } else if (action === "open-card") {
-    openModal({ type: "card", cardId: control.dataset.cardId }, control);
-  } else if (action === "start-card") {
-    const card = cardMap.get(control.dataset.cardId);
-    if (card) {
-      state.modal = null;
-      await startNewSession(card, { mode: state.settings.defaultMode });
-    }
-  } else if (action === "clear-library-filters") {
-    state.libraryFilters = { query: "", scene: "", domain: "", difficulty: "", favorites: "" };
-    render();
   } else if (action === "clear-history-filters") {
     state.historyFilters = { query: "", scene: "", domain: "", taskType: "", structureId: "", difficulty: "", retry: "", problem: "", migration: "", completionStatus: "" };
     render();
   } else if (action === "open-history-session") {
     openModal({ type: "history", sessionId: control.dataset.sessionId }, control);
-  } else if (action === "start-focus") {
-    await startFocusTraining();
   } else if (action === "export-data") {
     await exportData();
   } else if (action === "install-app") {
@@ -2163,8 +1058,6 @@ root.addEventListener("click", async (event) => {
       return;
     }
     try {
-      cancelScheduledActiveSave();
-      await activeSaveTail;
       await clearAllData();
       location.reload();
     } catch (error) {
@@ -2186,73 +1079,25 @@ root.addEventListener("click", async (event) => {
   }
 });
 
-function updateResearchProgress() {
-  const badge = root.querySelector("[data-research-count]");
-  const total = root.querySelectorAll("[data-research-prompt]").length;
-  const completed = root.querySelectorAll("[data-research-prompt]:checked").length;
-  if (badge) {
-    badge.textContent = `${completed} / ${total}`;
-  }
-}
-
-function updateOrganizeLiveFeedback() {
-  const card = cardForSession();
-  const badge = root.querySelector("[data-organize-count]");
-  const panel = root.querySelector("[data-organize-check]");
-  if (!card) {
-    return;
-  }
-  const completed = card.organizingTemplate.filter(
-    (item) => state.activeSession?.userNotes?.[item]?.trim(),
-  ).length;
-  if (badge) {
-    badge.textContent = `${completed} / ${card.organizingTemplate.length}`;
-  }
-  if (panel) {
-    panel.innerHTML = `<h3>进入表达前的提问式检查</h3>${organizeWarnings(state.activeSession, card)
-      .map((item) => `<p>${icon("info")}<span>${escapeHtml(item)}</span></p>`)
-      .join("")}`;
-  }
-}
-
 root.addEventListener("input", (event) => {
   const target = event.target;
   if (arena.handleInput(target) || lessons.handleInput(target)) {
     return;
   }
-  if (target.matches("[data-source-index]")) {
-    const index = Number(target.dataset.sourceIndex);
-    const field = target.dataset.sourceField;
-    updateActive((session) => {
-      const sources = session.sources.map((source, sourceIndex) => sourceIndex === index ? { ...source, [field]: target.value } : source);
-      return { ...session, sources };
-    }, { markNotes: true });
-  } else if (target.matches("[data-note-key]")) {
-    const key = target.dataset.noteKey;
-    updateActive((session) => ({ ...session, userNotes: { ...session.userNotes, [key]: target.value } }), { markNotes: true });
-    updateOrganizeLiveFeedback();
-    updateSpeakingOutline();
-  } else if (target.matches("[data-session-text]")) {
-    updateActive((session) => ({ ...session, [target.dataset.sessionText]: target.value }), { markNotes: true });
-  } else if (target.matches("[data-library-filter='query']")) {
-    state.libraryFilters.query = target.value;
-    debounceFilterRender(target, "library");
-  } else if (target.matches("[data-history-filter='query']")) {
+  if (target.matches("[data-history-filter='query']")) {
+    // 旧版记录搜索：边输入边筛选，防抖后重渲染并恢复光标位置
     state.historyFilters.query = target.value;
-    debounceFilterRender(target, "history");
-  } else if (target.matches("[data-setting='level']")) {
-    root.querySelector("#level-value").textContent = `L${target.value}`;
+    debounceFilterRender(target);
   }
 });
 
 let filterTimer;
-function debounceFilterRender(target, type) {
+function debounceFilterRender(target) {
   clearTimeout(filterTimer);
   const position = target.selectionStart;
   filterTimer = setTimeout(() => {
     render();
-    const selector = type === "library" ? "[data-library-filter='query']" : "[data-history-filter='query']";
-    const replacement = root.querySelector(selector);
+    const replacement = root.querySelector("[data-history-filter='query']");
     replacement?.focus();
     replacement?.setSelectionRange(position, position);
   }, 180);
@@ -2270,36 +1115,12 @@ root.addEventListener("change", async (event) => {
     target.disabled = true;
   }
   try {
-  if (target.name === "homeScene") {
-    resetTopicDraw();
-    state.homeScene = target.value;
-    render();
-  } else if (target.matches("[data-research-prompt]")) {
-    const card = cardForSession();
-    const prompt = card.researchPrompts[Number(target.dataset.researchPrompt)];
-    updateActive((session) => ({ ...session, researchChecks: { ...session.researchChecks, [prompt]: target.checked } }), { markNotes: true });
-    updateResearchProgress();
-  } else if (target.matches("[data-session-field]")) {
-    updateActive((session) => ({ ...session, [target.dataset.sessionField]: target.checked }), { markNotes: true });
-  } else if (target.matches("[data-recording-unavailable]")) {
-    const slot = target.dataset.recordingUnavailable;
-    updateActive((session) => ({ ...session, recordingUnavailable: { ...session.recordingUnavailable, [slot]: target.checked } }), { markNotes: true, render: state.activeSession?.stage === "retry" });
-  } else if (target.matches("[data-score-phase]")) {
-    const sourceKey = target.dataset.scorePhase === "retry" ? "retryScores" : "selfScores";
-    updateActive((session) => ({ ...session, [sourceKey]: { ...session[sourceKey], [target.dataset.metricId]: Number(target.value) } }), { markNotes: true });
-    target.closest(".score-scale")?.querySelectorAll(".score-choice").forEach((choice) => choice.classList.toggle("is-selected", choice.contains(target)));
-  } else if (target.name === "observableImprovement") {
-    updateActive((session) => ({ ...session, observableImprovement: target.value === "yes" }), { markNotes: true });
-  } else if (target.matches("[data-library-filter]")) {
-    const key = target.dataset.libraryFilter;
-    state.libraryFilters[key] = target.type === "checkbox" ? (target.checked ? "yes" : "") : target.value;
-    render();
-  } else if (target.matches("[data-history-filter]")) {
+  if (target.matches("[data-history-filter]")) {
     state.historyFilters[target.dataset.historyFilter] = target.value;
     render();
   } else if (target.matches("[data-setting]")) {
     const id = target.dataset.setting;
-    const value = target.type === "checkbox" ? target.checked : id === "level" ? Number(target.value) : target.value;
+    const value = target.type === "checkbox" ? target.checked : target.value;
     await updateSetting(id, value);
     render();
   } else if (target.matches("[data-import-file]") && target.files?.[0]) {
@@ -2318,9 +1139,32 @@ root.addEventListener("change", async (event) => {
   }
 });
 
+/**
+ * 地址栏 hash 变化：页内锚点（如“跳到主要内容”）只移动焦点不切换页面；
+ * 表达进行中拒绝离开当前页面；其余未知 hash 回到首页。
+ */
 window.addEventListener("hashchange", () => {
-  const requested = location.hash.slice(1);
-  state.view = validViews.has(requested) ? requested : "home";
+  let requested = location.hash.slice(1);
+  try {
+    requested = decodeURIComponent(requested);
+  } catch {
+    // 非法转义按未知 hash 处理
+  }
+  const anchor = !validViews.has(requested) && requested ? document.getElementById(requested) : null;
+  if (anchor) {
+    history.replaceState(null, "", `#${state.view}`);
+    if (!anchor.hasAttribute("tabindex")) anchor.setAttribute("tabindex", "-1");
+    anchor.focus();
+    return;
+  }
+  const next = validViews.has(requested) ? requested : "home";
+  if (next !== state.view && (arena.isBusy() || lessons.isBusy())) {
+    history.replaceState(null, "", `#${state.view}`);
+    showToast(BUSY_NAVIGATION_MESSAGE, "danger");
+    return;
+  }
+  if (next !== requested) history.replaceState(null, "", `#${next}`);
+  state.view = next;
   state.pendingFocus ??= { type: "main" };
   render();
 });
@@ -2376,45 +1220,39 @@ window.addEventListener("beforeinstallprompt", (event) => {
   }
 });
 
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden" && pendingActiveSave) {
-    void flushScheduledActiveSave().catch(() => {});
-  }
-});
-
-window.addEventListener("pagehide", () => {
-  if (pendingActiveSave) {
-    void flushScheduledActiveSave().catch(() => {});
-  }
-});
-
 window.addEventListener("beforeunload", (event) => {
-  const hadPendingSave = Boolean(pendingActiveSave);
-  const saveInFlight = state.saveStatus === "saving";
-  if (hadPendingSave) {
-    void flushScheduledActiveSave().catch(() => {});
-  }
-  if (recordingBusy() || arena.isBusy() || lessons.isBusy() || hadPendingSave || saveInFlight) {
+  if (arena.isBusy() || lessons.isBusy()) {
     event.preventDefault();
     event.returnValue = "";
   }
 });
 
+/**
+ * 从本地存储读取全部状态。
+ *
+ * 进行中的回合或课程若不是新版（schemaVersion 2），说明启动归档失败，按无进行中处理。
+ */
+async function loadLocalState() {
+  [state.settings, state.sessions, state.storage, state.drills, state.activeDrill, state.lessonRuns, state.activeLesson] = await Promise.all([
+    loadSettings(),
+    loadSessions(),
+    storageSummary(),
+    loadDrills(),
+    loadActiveDrill(),
+    loadLessonRuns(),
+    loadActiveLesson(),
+  ]);
+  if (state.activeDrill?.schemaVersion !== 2) state.activeDrill = null;
+  if (state.activeLesson?.schemaVersion !== 2) state.activeLesson = null;
+  state.sessions.sort((left, right) => sessionTimestamp(left) - sessionTimestamp(right));
+  state.homeMode = state.settings.defaultMode;
+}
+
 async function initialize() {
+  // 先归档旧版进行中训练，再读取状态
+  const archivedLegacy = await archiveLegacyInProgress().catch(() => 0);
   try {
-    [state.settings, state.sessions, state.activeSession, state.favorites, state.storage, state.drills, state.activeDrill, state.lessonRuns, state.activeLesson] = await Promise.all([
-      loadSettings(),
-      loadSessions(),
-      loadActiveSession(),
-      loadFavorites(),
-      storageSummary(),
-      loadDrills(),
-      loadActiveDrill(),
-      loadLessonRuns(),
-      loadActiveLesson(),
-    ]);
-    state.sessions.sort((left, right) => sessionTimestamp(left) - sessionTimestamp(right));
-    state.homeMode = state.settings.defaultMode;
+    await loadLocalState();
   } catch {
     showToast("无法读取部分本地数据，将以默认设置启动。", "danger");
   }
@@ -2424,7 +1262,7 @@ async function initialize() {
     history.replaceState(null, "", "#home");
   }
   render();
-  clockTimer = setInterval(updateClock, 1000);
+  if (archivedLegacy) showToast("旧版训练的进行中进度已归档到历史。");
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {
       // Offline installation is optional during local development.

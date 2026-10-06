@@ -3,8 +3,13 @@ import test from "node:test";
 
 import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
 
-import { TASK_CARDS } from "../public/js/data/cards.js";
-import { createSession } from "../public/js/core/session.js";
+import { TASK_CARDS } from "../public/js/legacy/cards.js";
+import { createSession } from "../public/js/legacy/session.js";
+import { PRACTICE_CARD_MAP, PARADIGM_MAP } from "../public/js/curriculum/index.js";
+import { createDrill } from "../public/js/arena/engine.js";
+import { createLessonRun } from "../public/js/arena/lesson-engine.js";
+import { ARENA_CARD_MAP } from "../public/js/legacy/scenarios.js";
+import { seeded } from "./helpers/random.js";
 
 const FALLBACK_KEY = "speak-clearly-fallback";
 let moduleSequence = 0;
@@ -183,6 +188,8 @@ test("storage import, completion, archival and clearing remain atomic", async (t
         () => storage.importLocalData(importDocument({
           sessions: [completedSession("imported-history")],
           activeSession: active,
+          // 非空收藏才会写入 favorites，才能触发上面注入的写入失败
+          favorites: [TASK_CARDS[4].id],
         })),
         /forced import failure/,
       );
@@ -392,5 +399,107 @@ test("storage import, completion, archival and clearing remain atomic", async (t
     assert.equal(saved.sessions.length, 10_000);
     assert.equal(saved.sessions[0].sessionId, "old-1");
     assert.equal(saved.sessions.at(-1).sessionId, "newest");
+  });
+
+  await t.test("升级后归档进行中的旧主题训练，并写入完成时间与原因", async (t) => {
+    installEnvironment(t);
+    const storage = await freshStorageModule();
+    await storage.saveActiveSession(activeSession("legacy-active"));
+    assert.equal(await storage.archiveLegacyInProgress(), 1);
+    assert.equal(await storage.loadActiveSession(), null);
+    const archived = (await storage.loadSessions()).find((session) => session.sessionId === "legacy-active");
+    assert.equal(archived.completionStatus, "abandoned");
+    assert.ok(archived.completedAt);
+    assert.equal(await storage.archiveLegacyInProgress(), 0, "第二次调用不应重复归档");
+  });
+
+  await t.test("导出为 version 2，且不含收藏与进行中的主题训练，可再导入", async (t) => {
+    installEnvironment(t);
+    const storage = await freshStorageModule();
+    const exported = await storage.exportLocalData();
+    assert.equal(exported.version, 2);
+    assert.equal("favorites" in exported, false);
+    assert.equal("activeSession" in exported, false);
+    await storage.importLocalData(exported);
+  });
+
+  await t.test("导入不含收藏的 v2 文件时保留本机收藏", async (t) => {
+    const indexedDB = new IDBFactory();
+    installEnvironment(t, { indexedDB });
+    const storage = await freshStorageModule();
+    await storage.saveFavorites(new Set([TASK_CARDS[3].id]));
+    await storage.importLocalData({ format: "speak-clearly-export", version: 2, settings: {}, sessions: [], drills: [], lessonRuns: [] });
+    assert.deepEqual([...await storage.loadFavorites()], [TASK_CARDS[3].id]);
+  });
+
+  await t.test("归档进行中的旧版回合与旧版课程（IndexedDB）", async (t) => {
+    const indexedDB = new IDBFactory();
+    installEnvironment(t, { indexedDB });
+    const storage = await freshStorageModule();
+    const now = Date.now();
+    const drillCard = ARENA_CARD_MAP.get("elevator--catering");
+    const legacyDrill = {
+      drillId: "legacy-drill", schemaVersion: 1, cardId: drillCard.id, cardVersion: drillCard.version, mode: "full", status: "in_progress", phase: "brief",
+      phaseStartedAt: null, startedAt: new Date(now - 1000).toISOString(), completedAt: null, selectionReason: "均衡轮换", revisitOf: null,
+      interruptId: drillCard.interrupts[0], interruptAt: 12, followupId: drillCard.followups[0],
+      takes: { first: { recordingId: null, durationSeconds: null, noRecording: false }, second: { recordingId: null, durationSeconds: null, noRecording: false } },
+      checks: { first: {}, second: {} }, focusCheckId: null, notes: {}, lesson: "",
+    };
+    const example = ARENA_CARD_MAP.get("bad_news--logistics");
+    const transfer = [...ARENA_CARD_MAP.values()].find((card) => card.scenarioId === "bad_news" && card.industryId !== "logistics");
+    const legacyLesson = {
+      runId: "legacy-lesson", schemaVersion: 1, scenarioId: "bad_news", exampleCardId: example.id, transferCardId: transfer.id,
+      phase: "intro", status: "in_progress", startedAt: new Date(now - 1000).toISOString(), completedAt: null,
+      takes: Object.fromEntries(["retell1", "retell2", "transfer"].map((slot) => [slot, { recordingId: null, durationSeconds: null, noRecording: false }])),
+      checks: { retell1: {}, retell2: {}, transfer: {} }, lesson: "",
+    };
+    await storage.saveDrillProgress(legacyDrill);
+    await storage.saveLessonProgress(legacyLesson);
+    assert.equal(await storage.archiveLegacyInProgress(), 2);
+    assert.equal(await storage.loadActiveDrill(), null);
+    assert.equal(await storage.loadActiveLesson(), null);
+    const drill = (await storage.loadDrills()).find((item) => item.drillId === "legacy-drill");
+    const lesson = (await storage.loadLessonRuns()).find((item) => item.runId === "legacy-lesson");
+    for (const record of [drill, lesson]) {
+      assert.equal(record.status, "abandoned");
+      assert.ok(record.completedAt);
+    }
+    assert.equal(await storage.archiveLegacyInProgress(), 0);
+  });
+
+  await t.test("v2 导出可在全新环境导入，已完成的回合与课程保持 schemaVersion 2", async (t) => {
+    installEnvironment(t, { indexedDB: new IDBFactory() });
+    const source = await freshStorageModule();
+    const now = Date.now();
+    const card = PRACTICE_CARD_MAP.get("A08-01");
+    const allChecks = Object.fromEntries(card.checks.map((id) => [id, true]));
+    const drill = {
+      ...createDrill(card, { random: seeded(3), now }),
+      status: "completed", phase: "done", completedAt: new Date(now).toISOString(),
+      checks: { first: allChecks, second: allChecks }, focusCheckId: card.checks[0],
+    };
+    const paradigm = PARADIGM_MAP.get("bad_news");
+    const lessonRun = createLessonRun(paradigm, { random: seeded(2), now });
+    const stepKeys = paradigm.steps.map((_, index) => `s${index}`);
+    const transferKeys = [...stepKeys, ...PRACTICE_CARD_MAP.get(lessonRun.transferCardId).keyChecks];
+    const toChecks = (keys) => Object.fromEntries(keys.map((key) => [key, true]));
+    const noRecordingTake = { recordingId: null, durationSeconds: 30, noRecording: true };
+    const lesson = {
+      ...lessonRun, phase: "done", status: "completed", completedAt: new Date(now).toISOString(),
+      takes: { retell1: noRecordingTake, retell2: noRecordingTake, transfer: noRecordingTake },
+      checks: { retell1: toChecks(stepKeys), retell2: toChecks(stepKeys), transfer: toChecks(transferKeys) },
+    };
+    await source.saveDrillProgress(drill);
+    await source.saveLessonProgress(lesson);
+    const exported = JSON.parse(JSON.stringify(await source.exportLocalData()));
+    assert.equal(exported.version, 2);
+
+    installEnvironment(t, { indexedDB: new IDBFactory() });
+    const target = await freshStorageModule();
+    await target.importLocalData(exported);
+    const drills = await target.loadDrills();
+    const lessons = await target.loadLessonRuns();
+    assert.deepEqual(drills.map((item) => [item.drillId, item.schemaVersion]), [[drill.drillId, 2]]);
+    assert.deepEqual(lessons.map((item) => [item.runId, item.schemaVersion]), [[lesson.runId, 2]]);
   });
 });
