@@ -13,7 +13,8 @@ import {
 } from "./legacy/engines.js";
 import { LESSON_MAP } from "./legacy/lessons.js";
 import { CAREER_STAGES } from "./curriculum/ids.js";
-import { PARADIGM_MAP, PRACTICE_CARD_MAP } from "./curriculum/index.js";
+import { PARADIGM_MAP, PRACTICE_CARD_MAP, generatedCardErrors, isExampleCard, registerGeneratedCards } from "./curriculum/index.js";
+import { normalizeProfile } from "./agent/profile.js";
 import { DRILL_MODES as PRACTICE_MODES, DRILL_PHASES as PRACTICE_PHASES, DRILL_STATUSES as PRACTICE_STATUSES } from "./arena/engine.js";
 import {
   LESSON_PHASES as NEW_LESSON_PHASES,
@@ -36,6 +37,9 @@ const MAX_SESSIONS = 10_000;
 const MAX_DRILLS = 10_000;
 const MAX_DRILL_NOTES = 12;
 const MAX_LESSON_RUNS = 2_000;
+// 生成题卡的硬上限；界面层按“最旧且没被引用”先行清理到 500 张以内
+const MAX_GENERATED_CARDS = 1_000;
+const AI_PROVIDERS = ["", "anthropic", "openai"];
 const MAX_SOURCES = 20;
 const MAX_STRING_LENGTH = 4_000;
 const CARD_MAP = new Map(TASK_CARDS.map((card) => [card.id, card]));
@@ -48,6 +52,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
   keepRecordings: true,
   onboardingComplete: false,
   careerStage: "phd",
+  // AI 默认关闭：在画像调研或设置页明确同意后才把画像摘要发送给模型服务
+  aiEnabled: false,
+  aiProvider: "",
+  // 用户同意的隐私说明版本；发送内容范围扩大时版本升级，需要重新同意
+  aiConsentVersion: 0,
 });
 
 let databasePromise;
@@ -326,10 +335,94 @@ function normalizeSettings(value, { allowPartial = false } = {}) {
     }
     settings.careerStage = value.careerStage;
   }
-  for (const key of ["soundEnabled", "reducedMotion", "keepRecordings", "onboardingComplete"]) {
+  if (value.aiProvider != null) {
+    if (!AI_PROVIDERS.includes(value.aiProvider)) {
+      throw new Error("导入文件中的 AI 服务设置无效");
+    }
+    settings.aiProvider = value.aiProvider;
+  }
+  if (value.aiConsentVersion != null) {
+    settings.aiConsentVersion = finiteNumber(value.aiConsentVersion, "AI 同意版本", { min: 0, max: 1_000, integer: true });
+  }
+  for (const key of ["soundEnabled", "reducedMotion", "keepRecordings", "onboardingComplete", "aiEnabled"]) {
     settings[key] = booleanValue(value[key], key, settings[key]);
   }
   return settings;
+}
+
+function cloneTextList(value) {
+  return Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item : "")) : [];
+}
+
+/**
+ * 规范化 AI 生成题卡：只保留题卡字段，并通过与精选题卡相同的校验。
+ *
+ * @param {unknown} raw 存储或导入的题卡
+ * @returns {object} 规范化后的原始题卡
+ */
+function normalizeGeneratedCard(raw) {
+  if (!isPlainObject(raw)) {
+    throw new Error("导入文件中的生成题卡无效");
+  }
+  const guide = isPlainObject(raw.prepGuide) ? raw.prepGuide : {};
+  const questions = isPlainObject(guide.questions) ? guide.questions : {};
+  const bad = isPlainObject(raw.badExample) ? raw.badExample : {};
+  const card = {
+    id: raw.id,
+    contextId: raw.contextId,
+    paradigmId: raw.paradigmId,
+    industryId: null,
+    origin: raw.origin,
+    generatedAt: typeof raw.generatedAt === "string" && validDate(raw.generatedAt) ? new Date(raw.generatedAt).toISOString() : null,
+    generator: typeof raw.generator === "string" ? raw.generator.slice(0, 80) : "",
+    title: raw.title,
+    situation: raw.situation,
+    goal: raw.goal,
+    role: raw.role,
+    personalNote: raw.personalNote,
+    prepGuide: {
+      questions: { who: questions.who, wants: questions.wants, outcome: questions.outcome },
+      whyStructure: guide.whyStructure,
+      stepHints: cloneTextList(guide.stepHints),
+    },
+    bestAnswer: (Array.isArray(raw.bestAnswer) ? raw.bestAnswer : []).map((line) => ({ step: line?.step, text: line?.text, why: line?.why })),
+    badExample: { text: bad.text, problems: cloneTextList(bad.problems) },
+    study: cloneTextList(raw.study),
+  };
+  // 用途与按画像改写的场合名、对象、难点、对方心态：早期生成的题卡没有这几项，缺省时不写入
+  for (const key of ["purpose", "sceneLabel", "counterpart", "tension", "mindset"]) {
+    if (raw[key] != null) card[key] = raw[key];
+  }
+  const errors = generatedCardErrors(card);
+  if (errors.length) {
+    throw new Error(`导入文件中的生成题卡无效：${errors[0]}`);
+  }
+  return card;
+}
+
+function normalizeStoredGeneratedCard(raw) {
+  try {
+    return normalizeGeneratedCard(raw);
+  } catch {
+    return null;
+  }
+}
+
+let generatedCardsReady = null;
+
+/**
+ * 确保本机保存的 AI 生成题卡已注册到题卡索引。
+ *
+ * 回合与课程记录按题卡索引校验，引用生成题卡的记录必须在注册之后读取，
+ * 否则会被当作“题卡不存在”丢弃；所以每个依赖题卡的读取入口都先等待这一步。
+ */
+function ensureGeneratedCardsRegistered() {
+  generatedCardsReady ??= getKey("generatedCards", [])
+    .then((value) => {
+      registerGeneratedCards((Array.isArray(value) ? value : []).map(normalizeStoredGeneratedCard).filter(Boolean));
+    })
+    .catch(() => {});
+  return generatedCardsReady;
 }
 
 function normalizeMap(value, field, allowedKeys, valueNormalizer) {
@@ -804,10 +897,13 @@ function normalizeParadigmLessonRun(raw, { stripRecordings = false } = {}) {
     throw new Error("导入文件中的迁移题卡无效");
   }
   const status = oneOf(raw.status, NEW_LESSON_STATUSES, "学习状态");
+  // AI 示范题卡只影响展示：找不到（被清理或导入时缺失）就退回课内的精选示范，不丢弃整条记录
+  const example = raw.exampleCardId == null ? null : PRACTICE_CARD_MAP.get(raw.exampleCardId);
   const run = {
     runId: identifier(raw.runId, "学习记录 ID"),
     schemaVersion: 2,
     paradigmId,
+    exampleCardId: isExampleCard(example) && example.paradigmId === paradigmId ? example.id : null,
     transferCardId: transfer.id,
     phase: oneOf(raw.phase, NEW_LESSON_PHASES, "学习阶段"),
     status,
@@ -898,6 +994,19 @@ function normalizeImportDocument(data) {
       throw new Error(`导入文件收藏了不存在的题卡：${id}`);
     }
   }
+  // 生成题卡先校验并注册，下面的回合与课程记录才能按题卡索引校验
+  if (data.generatedCards != null && (!Array.isArray(data.generatedCards) || data.generatedCards.length > MAX_GENERATED_CARDS)) {
+    throw new Error("导入文件中的生成题卡列表无效");
+  }
+  const generatedCards = (data.generatedCards ?? []).map(normalizeGeneratedCard);
+  if (new Set(generatedCards.map((card) => card.id)).size !== generatedCards.length) {
+    throw new Error("导入文件包含重复的生成题卡");
+  }
+  registerGeneratedCards(generatedCards);
+  const profile = data.profile == null ? null : normalizeProfile(data.profile);
+  if (data.profile != null && !profile) {
+    throw new Error("导入文件中的画像无效");
+  }
   if (data.drills != null && (!Array.isArray(data.drills) || data.drills.length > MAX_DRILLS)) {
     throw new Error("导入文件中的实战回合列表无效");
   }
@@ -923,10 +1032,14 @@ function normalizeImportDocument(data) {
     favorites,
     drills,
     lessonRuns,
+    profile,
+    generatedCards,
   };
 }
 
 async function readCurrentSnapshot() {
+  // 合并时要按题卡索引校验本机已有记录，先注册本机的生成题卡
+  await ensureGeneratedCardsRegistered();
   let database;
   try {
     database = await openDatabase();
@@ -940,6 +1053,8 @@ async function readCurrentSnapshot() {
       favorites: Array.isArray(fallback.favorites) ? fallback.favorites : [],
       drills: Array.isArray(fallback.drills) ? fallback.drills : [],
       lessonRuns: Array.isArray(fallback.lessonRuns) ? fallback.lessonRuns : [],
+      profile: fallback.profile ?? null,
+      generatedCards: Array.isArray(fallback.generatedCards) ? fallback.generatedCards : [],
     };
   }
   return {
@@ -953,11 +1068,15 @@ async function readCurrentSnapshot() {
       const activeRequest = kv.get("activeSession");
       const favoritesRequest = kv.get("favorites");
       const lessonRunsRequest = kv.get("lessonRuns");
+      const profileRequest = kv.get("profile");
+      const generatedRequest = kv.get("generatedCards");
       const sessionsRequest = sessions.getAll();
       settingsRequest.onsuccess = () => { result.settings = settingsRequest.result ?? null; };
       activeRequest.onsuccess = () => { result.activeSession = activeRequest.result ?? null; };
       favoritesRequest.onsuccess = () => { result.favorites = favoritesRequest.result ?? []; };
       lessonRunsRequest.onsuccess = () => { result.lessonRuns = lessonRunsRequest.result ?? []; };
+      profileRequest.onsuccess = () => { result.profile = profileRequest.result ?? null; };
+      generatedRequest.onsuccess = () => { result.generatedCards = Array.isArray(generatedRequest.result) ? generatedRequest.result : []; };
       sessionsRequest.onsuccess = () => { result.sessions = sessionsRequest.result ?? []; };
       drillsRequest.onsuccess = () => { result.drills = drillsRequest.result ?? []; };
       return result;
@@ -1055,6 +1174,11 @@ async function commitImport(snapshot, data) {
   const sessions = mergeSessions(snapshot.sessions, data.sessions);
   const drills = mergeDrills(snapshot.drills ?? [], data.drills ?? []);
   const lessonRuns = mergeLessonRuns(snapshot.lessonRuns ?? [], data.lessonRuns ?? []);
+  // 生成题卡按 ID 合并（本机已有的在前）；画像只在导入文件带了画像时覆盖本机画像
+  const localCards = (snapshot.generatedCards ?? []).map(normalizeStoredGeneratedCard).filter(Boolean);
+  const localIds = new Set(localCards.map((card) => card.id));
+  const generatedCards = [...localCards, ...data.generatedCards.filter((card) => !localIds.has(card.id))].slice(-MAX_GENERATED_CARDS);
+  const profile = data.profile ?? normalizeProfile(snapshot.profile);
   const activeSession = data.activeSession
     ? preserveLocalRecordingReferences(existingActive, data.activeSession)
     : null;
@@ -1070,6 +1194,8 @@ async function commitImport(snapshot, data) {
       ...(shouldWriteFavorites ? { favorites: data.favorites } : {}),
       drills,
       lessonRuns,
+      profile,
+      generatedCards,
     });
     return;
   }
@@ -1092,6 +1218,8 @@ async function commitImport(snapshot, data) {
     }
     kv.put(lessonRuns, "lessonRuns");
     kv.put(activeSession, "activeSession");
+    kv.put(profile, "profile");
+    kv.put(generatedCards, "generatedCards");
   });
 }
 
@@ -1193,6 +1321,7 @@ export async function saveCompletedSession(session) {
 }
 
 export async function loadDrills() {
+  await ensureGeneratedCardsRegistered();
   try {
     const database = await openDatabase();
     const drills = await runTransaction(database, "drills", "readonly", (transaction) =>
@@ -1205,11 +1334,13 @@ export async function loadDrills() {
 }
 
 export async function loadLessonRuns() {
+  await ensureGeneratedCardsRegistered();
   const value = await getKey("lessonRuns", []);
   return Array.isArray(value) ? value.map(normalizeStoredLessonRun).filter(Boolean) : [];
 }
 
 export async function loadActiveLesson() {
+  await ensureGeneratedCardsRegistered();
   const value = await getKey("activeLesson", null);
   return value ? normalizeStoredLessonRun(value) : null;
 }
@@ -1227,7 +1358,43 @@ export async function saveLessonProgress(run) {
   await setKey("activeLesson", run);
 }
 
+/** 学习者画像；没有建档或数据无效时返回 null。 */
+export async function loadProfile() {
+  try {
+    return normalizeProfile(await getKey("profile", null));
+  } catch {
+    return null;
+  }
+}
+
+export async function saveProfile(profile) {
+  const normalized = profile == null ? null : normalizeProfile(profile);
+  if (profile != null && !normalized) {
+    throw new Error("画像数据无效，未保存");
+  }
+  await setKey("profile", normalized);
+  return normalized;
+}
+
+/** 本机保存的 AI 生成题卡（原始结构，已注册到题卡索引）。 */
+export async function loadGeneratedCards() {
+  await ensureGeneratedCardsRegistered();
+  const value = await getKey("generatedCards", []);
+  return (Array.isArray(value) ? value : []).map(normalizeStoredGeneratedCard).filter(Boolean);
+}
+
+/**
+ * 保存全部生成题卡。调用方负责先注册新题卡、再按上限清理没被引用的旧题卡。
+ *
+ * @param {object[]} cards 原始题卡列表
+ */
+export async function saveGeneratedCards(cards) {
+  const normalized = cards.map(normalizeStoredGeneratedCard).filter(Boolean).slice(-MAX_GENERATED_CARDS);
+  await setKey("generatedCards", normalized);
+}
+
 export async function loadActiveDrill() {
+  await ensureGeneratedCardsRegistered();
   const value = await getKey("activeDrill", null);
   return value ? normalizeStoredDrill(value) : null;
 }
@@ -1433,11 +1600,13 @@ function sanitizeSessionForExport(session) {
  * @returns {Promise<object>} 可直接序列化为 JSON 的导出文档
  */
 export async function exportLocalData() {
-  const [settings, sessions, drills, lessonRuns] = await Promise.all([
+  const [settings, sessions, drills, lessonRuns, profile, generatedCards] = await Promise.all([
     loadSettings(),
     loadSessions(),
     loadDrills(),
     loadLessonRuns(),
+    loadProfile(),
+    loadGeneratedCards(),
   ]);
   return {
     format: "speak-clearly-export",
@@ -1448,6 +1617,9 @@ export async function exportLocalData() {
     sessions: sessions.map(sanitizeSessionForExport),
     drills: drills.map((drill) => normalizeDrill(drill, { stripRecordings: true })),
     lessonRuns: lessonRuns.map((run) => normalizeLessonRun(run, { stripRecordings: true })),
+    // 生成题卡要和引用它的回合一起导出，否则导入时这些回合会因找不到题卡被拒绝
+    profile,
+    generatedCards,
   };
 }
 

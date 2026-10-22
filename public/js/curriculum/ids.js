@@ -14,6 +14,9 @@ export const PARADIGM_IDS = Object.freeze([
 /** 每个阶段的课数：敢开口、讲清楚、能交锋、能推动、创业者。 */
 export const STAGE_SIZES = Object.freeze([7, 7, 7, 6, 3]);
 
+/** 五个阶段的名称，与 STAGE_SIZES 一一对应。 */
+export const STAGE_NAMES = Object.freeze(["敢开口", "讲清楚", "能交锋", "能推动", "创业者"]);
+
 /** 没有公认经典框架、允许 frameworks 为空的课。 */
 export const FRAMEWORK_OPTIONAL = Object.freeze(["analogy", "facilitate"]);
 

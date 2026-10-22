@@ -17,7 +17,7 @@ import { LIFE_CARDS } from "./cards/life.js";
 import { BRIDGE_CARDS } from "./cards/bridge.js";
 import { FOUNDER_CARDS } from "./cards/founder.js";
 import { INDUSTRIES } from "../arena/industries.js";
-import { validateCurriculum } from "./validate.js";
+import { validateCurriculum, validateGeneratedCard } from "./validate.js";
 
 /** 题库版本：内容有实质修改时递增，写入回合记录。 */
 export const CURRICULUM_VERSION = "2026.10.05-1";
@@ -65,15 +65,19 @@ function buildPracticeCard(raw) {
     status: "active",
     line: context.line,
     lineLabel: LINES[context.line].label,
-    contextLabel: context.label,
+    // AI 生成题卡显示按画像改写的场合名（如“周会进展汇报”），语境本身不变
+    contextLabel: raw.origin === "generated" && raw.sceneLabel ? raw.sceneLabel : context.label,
     paradigmTitle: paradigm.title,
     structure: paradigm.structure,
     steps: paradigm.steps,
     difficulty: context.difficulty,
     prepSeconds: context.prepSeconds,
     speakSeconds: context.speakSeconds,
-    role: context.role,
-    counterpart: context.counterpart,
+    // AI 生成题卡按学习者画像改写了身份、对象、难点与对方心态；精选题卡（和缺这几项的早期生成题卡）沿用语境
+    role: raw.origin === "generated" && raw.role ? raw.role : context.role,
+    counterpart: raw.origin === "generated" && raw.counterpart ? raw.counterpart : context.counterpart,
+    tension: raw.origin === "generated" && raw.tension ? raw.tension : context.tension,
+    mindset: raw.origin === "generated" && raw.mindset ? raw.mindset : context.mindset,
     alternativeParadigmIds: context.paradigmIds.filter((id) => id !== raw.paradigmId),
     keyChecks: [...context.keyChecks],
     interrupts: [...context.interrupts],
@@ -84,6 +88,59 @@ function buildPracticeCard(raw) {
 
 export const PRACTICE_CARDS = Object.freeze(RAW_CARDS.map(buildPracticeCard));
 export const PRACTICE_CARD_MAP = new Map(PRACTICE_CARDS.map((card) => [card.id, card]));
+
+// AI 生成题卡的注册表：与精选题卡共用 PRACTICE_CARD_MAP，引擎与存储按 ID 查卡时不区分来源。
+// 示范题卡（purpose = example）也登记在这里，供课程记录按 ID 引用，但不进入练习题池
+const GENERATED_CARDS = new Map();
+
+/** AI 生成题卡的校验错误；为空表示可以注册。 */
+export function generatedCardErrors(raw) {
+  return validateGeneratedCard(raw, { paradigms: PARADIGMS, contexts: CONTEXTS, industryIds: INDUSTRIES.map((item) => item.id) });
+}
+
+/**
+ * 注册 AI 生成题卡：逐张校验，合法的派生为运行时题卡并加入索引；已注册的 ID 跳过。
+ *
+ * @param {object[]} rawCards 原始生成题卡
+ * @returns {object[]} 本次新注册的运行时题卡
+ */
+export function registerGeneratedCards(rawCards) {
+  const added = [];
+  for (const raw of rawCards ?? []) {
+    if (!raw?.id || PRACTICE_CARD_MAP.has(raw.id) || generatedCardErrors(raw).length) continue;
+    const card = buildPracticeCard(raw);
+    GENERATED_CARDS.set(card.id, card);
+    PRACTICE_CARD_MAP.set(card.id, card);
+    added.push(card);
+  }
+  return added;
+}
+
+/** 移除已注册的生成题卡（用于清理超出上限且没被引用的旧题）。 */
+export function unregisterGeneratedCards(ids) {
+  for (const id of ids) {
+    if (GENERATED_CARDS.delete(id)) PRACTICE_CARD_MAP.delete(id);
+  }
+}
+
+/** 全部可练题卡：精选题卡在前，生成的练习题卡按注册顺序在后；示范题卡不在其中。 */
+export function allPracticeCards() {
+  return GENERATED_CARDS.size ? [...PRACTICE_CARDS, ...[...GENERATED_CARDS.values()].filter((card) => !isExampleCard(card))] : PRACTICE_CARDS;
+}
+
+/** 已注册的 AI 示范题卡（按注册顺序）。 */
+export function generatedExampleCards() {
+  return [...GENERATED_CARDS.values()].filter(isExampleCard);
+}
+
+export function isGeneratedCard(card) {
+  return card?.origin === "generated";
+}
+
+/** 一课的示范题卡：学习模式用它替换课内固定的示范场景。 */
+export function isExampleCard(card) {
+  return isGeneratedCard(card) && card.purpose === "example";
+}
 
 /** 检查项在界面上的名称：范式步骤显示步骤名，其余显示检查项名。 */
 export function checkLabel(card, id) {

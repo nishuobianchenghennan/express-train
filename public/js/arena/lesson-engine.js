@@ -8,7 +8,7 @@
  *   → retell2（减少提示：只剩步骤名）→ check2
  *   → transfer（换到另一条线的语境，只给步骤名）→ check3 → done
  */
-import { CONTEXT_MAP, PARADIGMS, PARADIGM_MAP, PRACTICE_CARDS, PRACTICE_CARD_MAP, stepKey } from "../curriculum/index.js";
+import { CONTEXT_MAP, PARADIGMS, PARADIGM_MAP, PRACTICE_CARD_MAP, allPracticeCards, generatedExampleCards, isGeneratedCard, stepKey } from "../curriculum/index.js";
 
 export { stepKey };
 
@@ -45,13 +45,18 @@ export function lessonTakeSlot(phase) {
   return CHECK_PHASE_TAKE[phase] ?? null;
 }
 
+/** 某张题卡能否用作这一课的迁移题：本课为主范式、语境在 transferContextIds 中。 */
+export function isTransferCandidate(paradigm, card) {
+  return card.paradigmId === paradigm.id && paradigm.transferContextIds.includes(card.contextId);
+}
+
 /**
  * 迁移题卡：本课为主范式、语境在 transferContextIds 中。
- * 优先与示范语境不同线；其中优先没用作过本课迁移题的，都用过时选最久未用的。
+ * 优先与示范语境不同线（exampleLine 缺省时取课内精选示范的线）；其中优先没用作过本课迁移题的
+ * （有没用过的 AI 生成题时先选它），都用过时选最久未用的。
  */
-export function pickTransferCard(paradigm, { runs = [], random = Math.random } = {}) {
-  const exampleLine = CONTEXT_MAP.get(paradigm.exampleContextId).line;
-  const pool = PRACTICE_CARDS.filter((card) => card.paradigmId === paradigm.id && paradigm.transferContextIds.includes(card.contextId));
+export function pickTransferCard(paradigm, { runs = [], random = Math.random, exampleLine = CONTEXT_MAP.get(paradigm.exampleContextId).line } = {}) {
+  const pool = allPracticeCards().filter((card) => isTransferCandidate(paradigm, card));
   const crossLine = pool.filter((card) => card.line !== exampleLine);
   const candidates = crossLine.length ? crossLine : pool;
   const lastUsed = new Map();
@@ -61,6 +66,8 @@ export function pickTransferCard(paradigm, { runs = [], random = Math.random } =
     if (!lastUsed.has(run.transferCardId) || time > lastUsed.get(run.transferCardId)) lastUsed.set(run.transferCardId, time);
   }
   const fresh = candidates.filter((card) => !lastUsed.has(card.id));
+  const freshGenerated = fresh.filter(isGeneratedCard);
+  if (freshGenerated.length) return pick(freshGenerated, random);
   if (fresh.length) return pick(fresh, random);
   const usedAt = (card) => lastUsed.get(card.id) ?? "";
   return [...candidates].sort((left, right) => (usedAt(left) < usedAt(right) ? -1 : usedAt(left) > usedAt(right) ? 1 : 0))[0];
@@ -70,13 +77,30 @@ function emptyTake() {
   return { recordingId: null, durationSeconds: null, noRecording: false };
 }
 
-/** 创建一次新版课程记录，并选定本课的迁移题卡。 */
-export function createLessonRun(paradigm, { runs = [], random = Math.random, now = Date.now() } = {}) {
+/**
+ * 还没被任何课程记录用过的 AI 示范题卡，取最新生成的一张；没有时返回 null（用课内的精选示范）。
+ * 示范所在的线必须和本课至少一个迁移语境不同，否则迁移步骤换不了线。
+ *
+ * @param {object} paradigm 本课
+ * @param {{ runs?: object[], examples?: object[] }} options 课程记录（含进行中的）与已注册的示范题卡
+ * @returns {object|null} 示范题卡
+ */
+export function pickLessonExample(paradigm, { runs = [], examples = generatedExampleCards() } = {}) {
+  const used = new Set(runs.map((run) => run.exampleCardId).filter(Boolean));
+  const transferLines = new Set(paradigm.transferContextIds.map((id) => CONTEXT_MAP.get(id)?.line));
+  return examples.filter((card) => card.paradigmId === paradigm.id && !used.has(card.id)
+    && [...transferLines].some((line) => line !== card.line)).at(-1) ?? null;
+}
+
+/** 创建一次新版课程记录：记下本课用的示范（AI 示范题卡或精选示范），并选定迁移题卡。 */
+export function createLessonRun(paradigm, { runs = [], random = Math.random, now = Date.now(), exampleCard = null } = {}) {
+  const exampleLine = exampleCard?.line ?? CONTEXT_MAP.get(paradigm.exampleContextId).line;
   return {
     runId: randomId(),
     schemaVersion: LESSON_SCHEMA_VERSION,
     paradigmId: paradigm.id,
-    transferCardId: pickTransferCard(paradigm, { runs, random }).id,
+    exampleCardId: exampleCard?.id ?? null,
+    transferCardId: pickTransferCard(paradigm, { runs, random, exampleLine }).id,
     phase: "intro",
     status: "in_progress",
     phaseStartedAt: null,

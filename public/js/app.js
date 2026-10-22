@@ -5,13 +5,13 @@ import { legacyCheckRates, legacyDrillOutcome } from "./legacy/engines.js";
 import { LESSON_MAP as LEGACY_LESSON_MAP } from "./legacy/lessons.js";
 import { CHECKS as LEGACY_CHECKS } from "./legacy/scenarios.js";
 import { CHECKS } from "./curriculum/checks.js";
-import { CAREER_STAGES } from "./curriculum/ids.js";
 import { LINES, LINE_WEIGHTS } from "./curriculum/contexts.js";
-import { PARADIGM_MAP, PRACTICE_CARDS, PRACTICE_CARD_MAP } from "./curriculum/index.js";
+import { PARADIGM_MAP, PRACTICE_CARD_MAP, allPracticeCards, isGeneratedCard } from "./curriculum/index.js";
 import { drawSequence, dueRevisits, practiceStats, revisitSelection, selectPracticeCard, weaknessLabel } from "./arena/engine.js";
 import { applyRateBars, createArenaController, estimateDrillMinutes, renderDrillHistory, renderPracticeAbility } from "./arena/ui.js";
 import { learnedParadigms, recentlyLearned, recommendedLesson } from "./arena/lesson-engine.js";
 import { createLessonController, renderCurriculumMap } from "./arena/lesson-ui.js";
+import { createAgentController } from "./agent/ui.js";
 import {
   archiveLegacyInProgress,
   clearAllData,
@@ -21,12 +21,16 @@ import {
   loadActiveDrill,
   loadActiveLesson,
   loadDrills,
+  loadGeneratedCards,
   loadLessonRuns,
+  loadProfile,
   loadRecording,
   loadSessions,
   loadSettings,
   saveDrillProgress,
+  saveGeneratedCards,
   saveLessonProgress,
+  saveProfile,
   saveRecording,
   saveSettings,
   storageSummary,
@@ -34,31 +38,26 @@ import {
 
 const root = document.querySelector("#app");
 const cardMap = new Map(TASK_CARDS.map((card) => [card.id, card]));
-const validViews = new Set(["home", "lessons", "history", "ability", "settings", "drill", "lesson"]);
+const validViews = new Set(["home", "lessons", "history", "ability", "settings", "drill", "lesson", "profile"]);
 const validCompletionStatuses = new Set(["completed", "skipped", "abandoned"]);
 const TOPIC_DRAW_DURATION_MS = 5_000;
 const BUSY_NAVIGATION_MESSAGE = "正在表达中，请先点“讲完了”。";
-/** “当前阶段”设置的文案：决定四条线的出题比例。 */
-const CAREER_STAGE_NAMES = Object.freeze({ phd: "博士在读", bridge: "准备转化", founder: "已创业" });
 /**
  * 按 LINE_WEIGHTS 生成出题比例提示，避免文案与权重配置脱节。
+ * 阶段不再让用户手选，由 AI 整理画像时判断（存在设置的 careerStage 里）；界面只展示比例。
  * 线名取前两个字作简称（学术线 → 学术、生活社交线 → 生活）。
  */
 function stageWeightHint(stageId) {
-  return Object.entries(LINE_WEIGHTS[stageId] ?? {})
+  return Object.entries(LINE_WEIGHTS[stageId] ?? LINE_WEIGHTS.phd)
     .map(([lineId, weight]) => `${(LINES[lineId]?.label ?? lineId).slice(0, 2)} ${weight}%`)
     .join(" · ");
 }
-const CAREER_STAGE_LABELS = Object.freeze(Object.fromEntries(
-  Object.entries(CAREER_STAGE_NAMES).map(([id, label]) => [id, Object.freeze({ label, hint: stageWeightHint(id) })]),
-));
 // 单张候选卡宽度 220px + 间距 12px，轮播位移按此步长计算
 const TOPIC_CARD_STRIDE_PX = 232;
 const TOPIC_IDLE_LOOP_MS = 30_000;
 // 抽题减速曲线：前段快速掠过，末段缓慢停靠到中奖卡
 const TOPIC_DRAW_EASING = "cubic-bezier(0.15, 0.55, 0.1, 1)";
 const exclusiveActions = new Set([
-  "setting-mode",
   "start-home",
   "explore-topics",
   "drill-start-prep",
@@ -73,24 +72,33 @@ const exclusiveActions = new Set([
   "lesson-next",
   "lesson-practice",
   "start-revisit",
-  "setting-stage",
-  "onboarding-stage",
   "export-data",
   "install-app",
   "confirm-clear-data",
   "complete-onboarding",
+  // AI 追问与整理画像耗时较长，由画像草稿自己的 busy 标记防重复，不占全局互斥锁
+  "profile-save",
+  "profile-fact-add",
+  "profile-fact-delete",
+  "profile-pending-accept",
+  "profile-pending-dismiss",
+  "profile-delete",
 ]);
 
 const state = {
   settings: { ...DEFAULT_SETTINGS },
   sessions: [],
   view: "home",
-  homeMode: "full",
   topicDraw: null,
   activeDrill: null,
   drills: [],
   activeLesson: null,
   lessonRuns: [],
+  // 学习者画像（记忆）、AI 生成题卡的原始数据、画像调研草稿、AI 服务状态
+  profile: null,
+  generatedCards: [],
+  profileDraft: null,
+  ai: { status: null, generating: false, lastError: "", configForm: null },
   historyFilters: {
     query: "",
     scene: "",
@@ -146,6 +154,24 @@ const lessons = createLessonController({
   loadRecording,
   saveLessonProgress,
   onPracticeParadigm: (paradigmId) => void practiceParadigm(paradigmId).catch((error) => showToast(error?.message || "无法开始练习，请重试。", "danger")),
+});
+const agent = createAgentController({
+  root,
+  state,
+  escapeHtml,
+  icon,
+  render: () => render(),
+  navigate: (view) => navigate(view),
+  showToast: (message, tone) => showToast(message, tone),
+  updateSetting: (id, value) => updateSetting(id, value),
+  setCareerStage: async (value) => {
+    await updateSetting("careerStage", value);
+    resetTopicDraw();
+  },
+  lineWeightHint: () => stageWeightHint(state.settings.careerStage),
+  saveProfile,
+  saveGeneratedCards,
+  swapTransferCard: (runId, cardId) => lessons.swapTransferCard(runId, cardId),
 });
 
 function escapeHtml(value = "") {
@@ -312,6 +338,7 @@ function renderShell(content, options = {}) {
           ${navItem("lessons", "30 课", "book")}
           ${navItem("history", "训练历史", "history")}
           ${navItem("ability", "能力档案", "chart")}
+          ${navItem("profile", "我的画像", "brain")}
         </nav>
         <div class="sidebar-foot">
           <div class="local-note">${icon("archive")}<span>数据保存在当前设备</span></div>
@@ -328,18 +355,11 @@ function renderShell(content, options = {}) {
         </header>
         <main id="main-content" class="main-content${training ? " training-content" : ""}" tabindex="-1">${content}</main>
       </div>
-      ${training ? "" : `<nav class="bottom-nav" aria-label="移动端导航">${navItem("home", "训练", "home")}${navItem("lessons", "30 课", "book")}${navItem("history", "历史", "history")}${navItem("ability", "能力", "chart")}${navItem("settings", "设置", "settings")}</nav>`}
+      ${training ? "" : `<nav class="bottom-nav" aria-label="移动端导航">${navItem("home", "训练", "home")}${navItem("lessons", "30 课", "book")}${navItem("history", "历史", "history")}${navItem("ability", "能力", "chart")}${navItem("profile", "画像", "brain")}${navItem("settings", "设置", "settings")}</nav>`}
     </div>
     ${renderModal()}
     ${!state.settings.onboardingComplete && !state.modal ? renderOnboarding() : ""}
   `;
-}
-
-function renderModeSelector(value, actionPrefix = "home-mode") {
-  return `<div class="segmented" role="radiogroup" aria-label="训练模式">
-    <button type="button" role="radio" aria-checked="${value === "full"}" tabindex="${value === "full" ? "0" : "-1"}" class="${value === "full" ? "is-active" : ""}" data-action="${actionPrefix}" data-value="full"><span>完整回合</span><small>开口 · 补课 · 重讲，约 10 分钟</small></button>
-    <button type="button" role="radio" aria-checked="${value === "quick"}" tabindex="${value === "quick" ? "0" : "-1"}" class="${value === "quick" ? "is-active" : ""}" data-action="${actionPrefix}" data-value="quick"><span>闪电回合</span><small>开口 · 重讲，约 4 分钟</small></button>
-  </div>`;
 }
 
 function resetTopicDraw() {
@@ -347,14 +367,14 @@ function resetTopicDraw() {
   state.topicDraw = null;
 }
 
+// 新回合一律是完整回合（开口 · 补课 · 重讲）；闪电回合只保留对历史记录的展示
 function currentTopicDraw() {
-  const draw = state.topicDraw;
-  return draw && draw.mode === state.homeMode ? draw : null;
+  return state.topicDraw;
 }
 
-/** 空闲轮播：按固定步长从精选题中取 8 张，展示四条线与各类语境的广度。 */
+/** 空闲轮播：按固定步长从题库（精选 + AI 生成）中取 8 张，展示四条线与各类语境的广度。 */
 function idleTopicCards() {
-  const pool = PRACTICE_CARDS.filter((card) => card.status === "active");
+  const pool = allPracticeCards().filter((card) => card.status === "active");
   const step = Math.max(1, Math.floor(pool.length / 8) + 1);
   return Array.from({ length: Math.min(8, pool.length) }, (_, index) => pool[(index * step) % pool.length]);
 }
@@ -366,25 +386,23 @@ function renderTopicDraw(draw) {
   const offset = winnerIndex > 0 ? winnerIndex * TOPIC_CARD_STRIDE_PX : 0;
   const idleOffset = idleBase.length * TOPIC_CARD_STRIDE_PX;
   const status = draw?.status ?? "idle";
+  const generatedCount = allPracticeCards().filter(isGeneratedCard).length;
   const statusText = status === "spinning"
-    ? "正在按阶段比例、弱项和复练计划选择"
+    ? "正在按画像比例、弱项和复练计划选择"
     : status === "settled"
       ? "已选出一道练习题"
-      : `${PRACTICE_CARDS.length} 道精选题 · 4 条线 · 56 类语境`;
-  const stage = status === "spinning" ? 2 : status === "settled" ? 3 : 1;
+      : `${allPracticeCards().length - generatedCount} 道精选题${generatedCount ? ` · ${generatedCount} 道为你生成` : ""} · 4 条线 · 56 类语境`;
   const winner = draw?.winnerId ? PRACTICE_CARD_MAP.get(draw.winnerId) : null;
-  return `<section class="topic-draw topic-draw-${status}" aria-label="本轮话题抽取">
-    <div class="topic-draw-heading"><div><p class="eyebrow">本回合入口</p><h3>抽一道题，直接开口</h3><p>只从已学的结构中出题 · 约 5 秒完成选择</p></div><span class="draw-step-count">${stage}<small>/ 3</small></span></div>
-    <ol class="draw-sequence" aria-label="抽题步骤"><li class="${stage >= 1 ? "is-current" : ""}"><span>1</span>浏览</li><li class="${stage >= 2 ? "is-current" : ""}"><span>2</span>定格</li><li class="${stage >= 3 ? "is-current" : ""}"><span>3</span>开口</li></ol>
+  return `<div class="topic-draw topic-draw-${status}" role="group" aria-label="本轮话题抽取">
     <p class="draw-status" aria-live="polite">${icon(status === "settled" ? "check" : status === "spinning" ? "clock" : "shuffle")}${escapeHtml(statusText)}</p>
     <div class="topic-draw-window">
       <div class="topic-draw-marker" aria-hidden="true"></div>
       <div class="topic-draw-track${status === "idle" ? " is-idle" : status === "spinning" ? " is-spinning" : " is-settled"}" data-draw-offset="${offset}" data-idle-offset="${idleOffset}">
-        ${cards.map((card, index) => `<article class="topic-draw-card${status === "settled" && index === winnerIndex ? " is-winner" : ""}"><div><span class="line-tag line-${card.line}">${escapeHtml(card.lineLabel)}</span><span>L${card.difficulty}</span></div><strong>${escapeHtml(card.contextLabel)}</strong><p>${escapeHtml(card.title)}</p></article>`).join("")}
+        ${cards.map((card, index) => `<article class="topic-draw-card${status === "settled" && index === winnerIndex ? " is-winner" : ""}"><div><span class="line-tag line-${card.line}">${escapeHtml(card.lineLabel)}</span><span>${isGeneratedCard(card) ? "AI · " : ""}L${card.difficulty}</span></div><strong>${escapeHtml(card.contextLabel)}</strong><p>${escapeHtml(card.title)}</p></article>`).join("")}
       </div>
     </div>
     ${status === "settled" && winner ? `<div class="draw-result"><span>${escapeHtml(draw.selectionReason)}</span><strong>${escapeHtml(winner.title)}</strong><p>${escapeHtml(winner.situation)}</p></div>` : ""}
-  </section>`;
+  </div>`;
 }
 
 /**
@@ -438,12 +456,74 @@ function renderHomeStartAction(draw, card) {
   if (draw?.status === "spinning") {
     return `<button class="button button-primary button-large" type="button" disabled>${icon("clock")}<span>正在抽取题目…</span></button>`;
   }
-  const label = draw?.status === "settled" && card ? `开始这一回合 · 约 ${estimateDrillMinutes(card, state.homeMode)} 分钟` : "抽一道练习题";
+  const label = draw?.status === "settled" && card ? `开始这一回合 · 约 ${estimateDrillMinutes(card, "full")} 分钟` : "抽一道练习题";
   return `<button class="button button-primary button-large" type="button" data-action="start-home">${icon(draw?.status === "settled" ? "play" : "shuffle")}<span>${label}</span></button>`;
 }
 
 /**
- * 首页“今日计划”：进行中 → 到期复练 → 推荐一课 → 练习抽题 → 概览。
+ * 当前弱项的标题与说明：首页与能力页同一口径。
+ * 弱项要求某一项至少观察 3 次且首轮做到率低于 70%，所以回合够了也可能暂时没有弱项。
+ */
+function weaknessSummary(stats) {
+  const weakness = stats.weakness;
+  if (weakness) {
+    return { title: weaknessLabel(weakness), text: `首轮${weakness.kind === "structure" ? "步骤覆盖率" : "做到率"} ${weakness.rate}%，抽题会优先安排考核这一项的题。` };
+  }
+  if (stats.completed < 3) return { title: "还在观察", text: "完成 3 个回合后，系统会根据首轮没做到的项找出弱项。" };
+  return { title: "暂无明显弱项", text: "观察到 3 次以上的项，首轮做到率都不低于 70%。" };
+}
+
+/** 学下一课的按钮文字：30 课都学过时是复习最久没练的一课。 */
+function lessonCallLabel(lesson, learned, verb = "学") {
+  return `${learned.size >= 30 ? "复习" : verb}第 ${lesson.order} 课 · ${lesson.title}`;
+}
+
+/**
+ * 首页“下一步”：按优先级只给一个主按钮，另一件事作为次要按钮。
+ * 进行中的回合 > 进行中的课 > 到期复练 > 一课没学时的第 1 课 > 今天还没学课时的下一课；
+ * 其余情况返回 null，由练习区承担主操作。
+ *
+ * @returns {{ icon, eyebrow, title, text, primary, secondary }|null} 行动卡内容（按钮为现成 HTML）
+ */
+function homeAction({ stats, learned, learnedToday, nextLesson }) {
+  const button = (kind, attrs, label, iconName) => `<button class="button ${kind === "primary" ? "button-primary" : "button-ghost"}" type="button" ${attrs}>${label}${icon(iconName)}</button>`;
+  const exampleNote = agent.lessonExampleReady(nextLesson) ? "示范已按你的画像写好（AI）。" : "";
+  const lessonButton = (kind) => button(kind, `data-action="lesson-start" data-paradigm="${escapeHtml(nextLesson.id)}"`, escapeHtml(kind === "primary" ? "开始这一课" : lessonCallLabel(nextLesson, learned)), "chevronRight");
+  const practiceButton = button("secondary", `data-action="start-home" data-scroll="practice"`, "先练一回合", "shuffle");
+  const drill = state.activeDrill?.status === "in_progress" ? state.activeDrill : null;
+  const lessonRun = state.activeLesson?.status === "in_progress" ? state.activeLesson : null;
+  const lessonParadigm = lessonRun ? PARADIGM_MAP.get(lessonRun.paradigmId) : null;
+  const lessonTitle = lessonParadigm ? `第 ${lessonParadigm.order} 课 · ${lessonParadigm.title}` : "";
+  if (drill) {
+    return {
+      icon: "play", eyebrow: "继续", title: PRACTICE_CARD_MAP.get(drill.cardId)?.title ?? drill.title ?? "练习回合", text: "这一回合还没做完，进度已保存在当前设备。",
+      primary: button("primary", `data-action="resume-drill"`, "继续这一回合", "chevronRight"),
+      secondary: lessonRun ? button("secondary", `data-action="resume-lesson"`, escapeHtml(`继续${lessonTitle}`), "book") : "",
+    };
+  }
+  if (lessonRun) {
+    return { icon: "book", eyebrow: "继续", title: lessonTitle, text: "这一课还没学完，进度已保存在当前设备。", primary: button("primary", `data-action="resume-lesson"`, "继续这一课", "chevronRight"), secondary: "" };
+  }
+  const revisit = dueRevisits(state.drills)[0];
+  const revisitCard = revisit ? PRACTICE_CARD_MAP.get(revisit.cardId) : null;
+  if (revisitCard) {
+    return {
+      icon: "rotate", eyebrow: `到期复练 · ${stats.revisitsDue} 个`, title: revisitCard.title, text: "上次首轮有没做到的项。这次会换一组打断和追问，检验改进有没有留下来。",
+      primary: button("primary", `data-action="start-revisit"`, "开始复练", "chevronRight"),
+      secondary: !learnedToday && learned.size < 30 ? lessonButton("secondary") : "",
+    };
+  }
+  if (!learned.size) {
+    return { icon: "book", eyebrow: "从这里开始", title: `第 ${nextLesson.order} 课 · ${nextLesson.title}`, text: `${exampleNote}${nextLesson.structure}。${nextLesson.whenToUse}`, primary: lessonButton("primary"), secondary: "" };
+  }
+  if (!learnedToday && learned.size < 30) {
+    return { icon: "book", eyebrow: "下一步 · 今天学一课", title: `第 ${nextLesson.order} 课 · ${nextLesson.title}`, text: `${exampleNote}${nextLesson.structure}。`, primary: lessonButton("primary"), secondary: practiceButton };
+  }
+  return null;
+}
+
+/**
+ * 首页：页头 → 下一步 → AI 通知 → 练一回合 → 进度。
  *
  * @returns {string} 首页 HTML
  */
@@ -451,54 +531,45 @@ function renderHome() {
   const stats = practiceStats(state.drills);
   const learned = learnedParadigms(state.lessonRuns);
   const drill = state.activeDrill?.status === "in_progress" ? state.activeDrill : null;
-  const drillCard = drill ? PRACTICE_CARD_MAP.get(drill.cardId) : null;
-  const lessonRun = state.activeLesson?.status === "in_progress" ? state.activeLesson : null;
-  const lessonParadigm = lessonRun ? PARADIGM_MAP.get(lessonRun.paradigmId) : null;
   const nextLesson = recommendedLesson(state.lessonRuns);
-  const revisit = dueRevisits(state.drills)[0];
-  const revisitCard = revisit ? PRACTICE_CARD_MAP.get(revisit.cardId) : null;
   const draw = currentTopicDraw();
   const drawnCard = draw?.winnerId ? PRACTICE_CARD_MAP.get(draw.winnerId) : null;
-  const stage = CAREER_STAGE_LABELS[state.settings.careerStage] ?? CAREER_STAGE_LABELS.phd;
   const todayKey = dateKey(new Date());
   const learnedToday = state.lessonRuns.some((run) => run.schemaVersion === 2 && run.status === "completed" && dateKey(run.completedAt) === todayKey);
-
-  // 进行中的回合优先展示；课程也在进行中时，再补一个简洁的“继续第 N 课”入口
-  const lessonTitle = `第 ${escapeHtml(String(lessonParadigm?.order ?? ""))} 课 · ${escapeHtml(lessonParadigm?.title ?? "")}`;
-  const continueTitle = drill ? escapeHtml(drillCard?.title ?? drill.title ?? "练习回合") : lessonTitle;
-  const continueBlock = drill || lessonRun
-    ? `<section class="focus-band"><div class="focus-icon">${icon("play")}</div><div><p class="eyebrow">继续</p><h2>${continueTitle}</h2><p>进度已保存在当前设备。</p></div><button class="button button-primary" type="button" data-action="${drill ? "resume-drill" : "resume-lesson"}">继续${icon("chevronRight")}</button></section>`
+  const action = homeAction({ stats, learned, learnedToday, nextLesson });
+  const actionBlock = action
+    ? `<section class="focus-band home-action" aria-labelledby="action-title"><div class="focus-icon">${icon(action.icon)}</div><div><p class="eyebrow">${escapeHtml(action.eyebrow)}</p><h2 id="action-title">${escapeHtml(action.title)}</h2><p>${escapeHtml(action.text)}</p></div><div class="home-action-buttons">${action.primary}${action.secondary}</div></section>`
     : "";
-  const continueLessonBlock = drill && lessonRun
-    ? `<section class="focus-band focus-band-quiet"><div class="focus-icon">${icon("book")}</div><div><p class="eyebrow">课程进行中</p><h2>${lessonTitle}</h2></div><button class="button button-secondary" type="button" data-action="resume-lesson">继续第 ${escapeHtml(String(lessonParadigm?.order ?? ""))} 课${icon("chevronRight")}</button></section>`
-    : "";
-  const revisitBlock = !drill && revisitCard
-    ? `<section class="focus-band"><div class="focus-icon">${icon("rotate")}</div><div><p class="eyebrow">到期复练 · ${stats.revisitsDue} 个</p><h2>${escapeHtml(revisitCard.title)}</h2><p>上次首轮有没做到的项。这次会换一组打断和追问，检验改进有没有留下来。</p></div><button class="button button-secondary" type="button" data-action="start-revisit">开始复练${icon("chevronRight")}</button></section>`
-    : "";
-  const lessonBlock = !lessonRun && (!learned.size || (!learnedToday && learned.size < 30))
-    ? `<section class="focus-band"><div class="focus-icon">${icon("book")}</div><div><p class="eyebrow">${learned.size ? "可选 · 今天学一课" : "从这里开始"}</p><h2>第 ${nextLesson.order} 课 · ${escapeHtml(nextLesson.title)}</h2><p>${escapeHtml(nextLesson.structure)}。${escapeHtml(nextLesson.whenToUse)}</p></div><button class="button button-primary" type="button" data-action="lesson-start" data-paradigm="${escapeHtml(nextLesson.id)}">开始这一课${icon("chevronRight")}</button></section>`
+  // 练习区是主操作时（没有行动卡），在标题旁给学课的次要入口
+  const lessonLink = !action && !state.activeLesson && learned.size
+    ? `<button class="text-button" type="button" data-action="lesson-start" data-paradigm="${escapeHtml(nextLesson.id)}">${icon("book")}${escapeHtml(lessonCallLabel(nextLesson, learned))}${agent.lessonExampleReady(nextLesson) ? "（示范已按画像写好）" : ""}</button>`
     : "";
   const practiceBlock = learned.size && !drill
-    ? `<section class="practice-entry" aria-labelledby="today-title">
-        <div class="entry-main">
-          <div class="entry-kicker"><span class="status-badge ${draw?.status === "settled" ? "status-done" : "status-ready"}">${draw?.status === "settled" ? "已选出题目" : "练习回合"}</span><span>${state.homeMode === "quick" ? "闪电回合" : "完整回合"} · 从已学的 ${learned.size} 种结构中出题</span></div>
-          <h2 id="today-title">${drawnCard ? escapeHtml(drawnCard.title) : "抽一道题，30 秒内开口"}</h2>
-          <p class="entry-description">${drawnCard ? escapeHtml(drawnCard.goal) : "准备阶段会先引导你判断场景、选对结构；讲完再对照这道题的最优方案。"}</p>
-          ${renderTopicDraw(draw)}
+    ? `<section class="practice-entry" id="practice-entry" aria-labelledby="today-title">
+        <div class="practice-head">
+          <div>
+            <p class="eyebrow">${action ? "练一回合" : "下一步 · 练一回合"}</p>
+            <h2 id="today-title">${drawnCard ? escapeHtml(drawnCard.title) : "抽一道题，30 秒内开口"}</h2>
+            <p class="entry-description">${drawnCard ? escapeHtml(drawnCard.goal) : `完整回合：开口、补课、重讲 · 从已学的 ${learned.size} 种结构中出题`}</p>
+          </div>
+          ${lessonLink}
         </div>
-        <aside class="entry-controls">${renderModeSelector(state.homeMode)}${renderHomeStartAction(draw, drawnCard)}<button class="button button-ghost explore-topics" type="button" data-action="explore-topics">${icon("shuffle")}换一题</button></aside>
+        ${renderTopicDraw(draw)}
+        <div class="entry-controls">${renderHomeStartAction(draw, drawnCard)}${draw?.status === "settled" ? `<button class="button button-ghost explore-topics" type="button" data-action="explore-topics">${icon("shuffle")}换一题</button>` : ""}</div>
       </section>`
     : "";
-  const weakness = stats.weakness;
-  const weaknessText = weakness
-    ? `首轮${weakness.kind === "structure" ? "步骤覆盖率" : "做到率"} ${weakness.rate}%，抽题会优先安排考核这一项的题。`
-    : "完成 3 个回合后，系统会根据首轮没做到的项找出弱项。";
+  const weakness = weaknessSummary(stats);
   const headline = stats.today ? `今天已完成 ${stats.today} 回合` : learned.size ? "今天先开口一次" : "先学会第一种表达结构";
   const content = `
-    <div class="home-intent-bar"><div><p class="eyebrow">今日训练 · ${escapeHtml(stage.label)}</p><h1>${headline}</h1><p>从“不知道怎么开口”到“能说会道”：先学一种结构，再在学术、生活、转化、创业四条线的真实场合里用出来。</p></div><div class="intent-streak"><span>已学结构</span><strong>${learned.size}</strong><small>/ 30</small></div></div>
-    ${continueBlock}${continueLessonBlock}${revisitBlock}${lessonBlock}${practiceBlock}
-    <section class="focus-band focus-band-quiet" aria-labelledby="focus-title"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">当前弱项（按首轮冷启动统计）</p><h2 id="focus-title">${weakness ? escapeHtml(weaknessLabel(weakness)) : "还在观察"}</h2><p>${weaknessText}</p></div><button class="button button-secondary" type="button" data-action="navigate" data-view="ability">查看依据${icon("chevronRight")}</button></section>
-    <section class="progress-strip progress-strip-overview" aria-label="训练概览"><div><span>今日回合</span><strong>${stats.today}</strong></div><div><span>近 7 天</span><strong>${stats.last7}</strong></div><div><span>连续天数</span><strong>${stats.streak}</strong></div><div><span>接住打断</span><strong>${stats.pressureRate == null ? "—" : `${stats.pressureRate}%`}</strong></div>${Object.entries(LINES).map(([id, line]) => `<div><span>${escapeHtml(line.label)}</span><strong>${stats.lineCounts[id] ?? 0}</strong></div>`).join("")}</section>
+    <div class="home-intent-bar"><div><h1>${headline}</h1>${learned.size ? "" : `<p>从“不知道怎么开口”到“能说会道”：先学一种结构，再在学术、生活、转化、创业四条线的真实场合里用出来。</p>`}</div></div>
+    ${actionBlock}${agent.renderHomePrompt()}${practiceBlock}
+    <section class="home-progress" aria-label="训练概览">
+      <div><span>已学结构</span><strong>${learned.size}<small> / 30</small></strong></div>
+      <div><span>今日回合</span><strong>${stats.today}</strong></div>
+      <div><span>近 7 天</span><strong>${stats.last7}</strong></div>
+      <div><span>连续天数</span><strong>${stats.streak}</strong></div>
+      <div class="home-weakness"><span>当前弱项（按首轮统计）</span><strong>${escapeHtml(weakness.title)}</strong><small>${escapeHtml(weakness.text)}</small><button class="text-button" type="button" data-action="navigate" data-view="ability">查看依据${icon("chevronRight")}</button></div>
+    </section>
   `;
   return renderShell(content, { title: "今日训练" });
 }
@@ -509,9 +580,16 @@ function renderHome() {
  * @returns {string} 课程页 HTML
  */
 function renderLessonsPage() {
-  const learned = learnedParadigms(state.lessonRuns).size;
+  const learned = learnedParadigms(state.lessonRuns);
+  const activeRun = state.activeLesson?.status === "in_progress" ? state.activeLesson : null;
+  const activeLesson = activeRun ? PARADIGM_MAP.get(activeRun.paradigmId) : null;
+  const nextLesson = recommendedLesson(state.lessonRuns);
+  // 页头主按钮：有进行中的课就继续它，否则开始推荐的下一课
+  const cta = activeLesson
+    ? `<button class="button button-primary" type="button" data-action="resume-lesson">${icon("play")}继续第 ${activeLesson.order} 课 · ${escapeHtml(activeLesson.title)}</button>`
+    : `<button class="button button-primary" type="button" data-action="lesson-start" data-paradigm="${escapeHtml(nextLesson.id)}">${icon("play")}${escapeHtml(lessonCallLabel(nextLesson, learned, "开始"))}</button>`;
   const content = `
-    <div class="page-heading"><div><p class="eyebrow">学习路径</p><h1>30 课：表达的全部结构</h1><p>五个阶段：敢开口 → 讲清楚 → 能交锋 → 能推动 → 创业者。每课学一种结构，学完后它就会进入练习题池。</p></div><div class="library-count"><strong>${learned}</strong><span>/ 30 已学</span></div></div>
+    <div class="page-heading lessons-heading"><div><p class="eyebrow">学习路径</p><h1>30 课：表达的全部结构</h1><p>五个阶段：敢开口 → 讲清楚 → 能交锋 → 能推动 → 创业者。每课学一种结构，学完后它就会进入练习题池。</p></div><div class="lessons-cta"><div class="library-count"><strong>${learned.size}</strong><span>/ 30 已学</span></div>${cta}</div></div>
     ${renderCurriculumMap({ runs: state.lessonRuns, activeRun: state.activeLesson }, { escapeHtml })}
   `;
   return renderShell(content, { title: "30 课" });
@@ -609,16 +687,17 @@ function renderProtocolCoverage(counts) {
 
 function renderAbility() {
   const stats = calculateStats(state.sessions, TASK_CARDS, METRICS);
-  const weakness = practiceStats(state.drills).weakness;
+  const practice = practiceStats(state.drills);
+  const weakness = practice.weakness;
   const weakCheck = weakness?.kind === "behavior" ? CHECKS[weakness.id] : null;
   const weakParadigm = weakness?.kind === "structure" ? PARADIGM_MAP.get(weakness.id) : null;
   const weakTip = weakCheck?.tip ?? (weakParadigm ? `按“${weakParadigm.structure}”的顺序把每一步都讲到。` : "");
   const legacyRates = Object.entries(legacyCheckRates(state.drills)).sort((left, right) => left[1].firstRate - right[1].firstRate);
   const metricEntries = Object.entries(stats.metrics).sort((left, right) => left[1].average - right[1].average);
   const content = `
-    <div class="page-heading"><div><p class="eyebrow">能力档案</p><h1>看可观察的行为，不看笼统总分</h1><p>每一项都是回听时能回答“做到 / 没做到”的具体行为。首轮代表冷启动的真实水平，重讲代表改正能力。</p></div><div class="headline-stat"><span>弱项</span><strong>${weakness ? escapeHtml(weaknessLabel(weakness)) : "—"}</strong><small>${weakness ? "抽题优先安排" : "完成 3 回合后判断"}</small></div></div>
+    <div class="page-heading"><div><h1>看可观察的行为，不看笼统总分</h1><p>每一项都是回听时能回答“做到 / 没做到”的具体行为。首轮代表冷启动的真实水平，重讲代表改正能力。</p></div><div class="headline-stat"><span>弱项</span><strong>${escapeHtml(weaknessSummary(practice).title)}</strong><small>${weakness ? "抽题优先安排" : "至少观察 3 次、首轮低于 70% 才算"}</small></div></div>
     ${renderPracticeAbility(state.drills, { escapeHtml, icon })}
-    <section class="focus-band ability-focus"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">下一回合</p><h2>${weakness ? `练「${escapeHtml(weaknessLabel(weakness))}」` : "继续覆盖四条线"}</h2><p>${weakness ? escapeHtml(weakTip) : "抽题会按当前阶段的比例覆盖四条线，并优先安排你刚学的结构。"}</p></div><button class="button button-primary" type="button" data-action="navigate" data-view="home">去今日训练${icon("arrowRight")}</button></section>
+    <section class="focus-band ability-focus"><div class="focus-icon">${icon("target")}</div><div><p class="eyebrow">下一回合</p><h2>${weakness ? `练「${escapeHtml(weaknessLabel(weakness))}」` : "继续覆盖四条线"}</h2><p>${weakness ? escapeHtml(weakTip) : "抽题会按画像决定的比例覆盖四条线，并优先安排你刚学的结构。"}</p></div><button class="button button-primary" type="button" data-action="navigate" data-view="home">去今日训练${icon("arrowRight")}</button></section>
     ${state.sessions.length ? `<details class="legacy-ability"><summary>${icon("book")}旧版主题训练档案（只读，1–5 分自评口径，${state.sessions.length} 条记录）</summary>
     <div class="ability-grid">
       <section class="dashboard-section wide"><div class="section-heading"><div><p class="eyebrow">滚动覆盖</p><h2>十类表达场景</h2></div><div class="range-legend"><span><i class="legend-dot seven"></i>7 天</span><span><i class="legend-dot thirty"></i>30 天</span></div></div><div class="dual-coverage">${Object.entries(SCENES).map(([id, scene]) => { const seven = stats.sceneCounts7[id] ?? 0; const thirty = stats.sceneCounts30[id] ?? 0; const max = Math.max(1, ...Object.values(stats.sceneCounts30)); return `<div><span>${escapeHtml(scene.label)}</span><div><progress class="progress-seven" value="${seven}" max="${max}" aria-label="7 天 ${seven} 次"></progress><progress class="progress-thirty" value="${thirty}" max="${max}" aria-label="30 天 ${thirty} 次"></progress></div><strong>${seven} / ${thirty}</strong></div>`; }).join("")}</div></section>
@@ -635,12 +714,9 @@ function renderAbility() {
 
 function renderSettings() {
   const content = `
-    <div class="page-heading"><div><p class="eyebrow">设置</p><h1>训练与本地数据</h1><p>调整当前阶段、计时体验、录音保留和数据迁移。</p></div></div>
+    <div class="page-heading"><div><h1>训练与本地数据</h1><p>调整 AI 助手、计时体验、录音保留和数据迁移。出题比例由画像决定，题目难度随完成量自动提高。</p></div></div>
     <div class="settings-layout">
-      <section class="settings-section"><div class="settings-head"><div>${icon("target")}</div><span><h2>训练偏好</h2><p>当前阶段决定练习题在四条线之间的比例；题目难度随完成量自动提高。</p></span></div>
-        <div class="setting-row stacked"><div><span>当前阶段</span><small>决定四条线的出题比例，可以随时改。</small></div>${renderStageSelector("setting-stage")}</div>
-        <div class="setting-row stacked"><div><span>首页默认模式</span><small>随时可以在开始前临时切换。</small></div>${renderModeSelector(state.settings.defaultMode, "setting-mode")}</div>
-      </section>
+      ${agent.renderAiSettings()}
       <section class="settings-section"><div class="settings-head"><div>${icon("clock")}</div><span><h2>执行体验</h2><p>计时到点只提示，不强制停止。</p></span></div>
         ${renderToggle("soundEnabled", "计时提示音", "阶段到点时播放一次温和提示。")}
         ${renderToggle("reducedMotion", "减少动态效果", "关闭非必要过渡和闪动。")}
@@ -651,21 +727,10 @@ function renderSettings() {
         <div class="data-actions"><button class="button button-secondary" type="button" data-action="export-data">${icon("download")}导出 JSON</button><label class="button button-secondary file-button">${icon("upload")}导入 JSON<input type="file" accept="application/json,.json" data-import-file></label>${state.installPrompt ? `<button class="button button-secondary" type="button" data-action="install-app">${icon("download")}安装到设备</button>` : ""}<button class="button button-danger-ghost" type="button" data-action="open-clear-data">${icon("trash")}清除全部本地数据</button></div>
         <p class="data-note">JSON 导出不包含录音文件。导入会合并训练记录并覆盖设置。</p>
       </section>
-      <section class="settings-section privacy-section"><div class="settings-head"><div>${icon("info")}</div><span><h2>隐私边界</h2><p>本应用不主动收集行为数据，也不接入广告或分析服务。</p></span></div><p>训练笔记与录音默认仅保存在当前设备的浏览器存储中。静态服务器仍可能处理提供网页所必需的基础访问信息，例如 IP 地址和 User-Agent；具体取决于部署环境。</p><p>麦克风只在你点击录音后请求权限。关闭页面前请先停止录音。</p></section>
+      <section class="settings-section privacy-section"><div class="settings-head"><div>${icon("info")}</div><span><h2>隐私边界</h2><p>本应用不主动收集行为数据，也不接入广告或分析服务。</p></span></div><p>训练笔记与录音默认仅保存在当前设备的浏览器存储中。静态服务器仍可能处理提供网页所必需的基础访问信息，例如 IP 地址和 User-Agent；具体取决于部署环境。</p><p>麦克风只在你点击录音后请求权限。关闭页面前请先停止录音。</p><p>AI 助手默认关闭。开启后，画像摘要、训练摘要（学到第几课、各步覆盖率、行为弱项、最近练过的题目和“带走的一句话”）与出题规格会经本机服务端发送给你选择的模型服务；每完成几个回合，还会发送最近练习的题目、没做到的检查项和带走的话，用来提炼观察，观察经你确认后才写入画像。录音不会发送。</p></section>
     </div>
   `;
   return renderShell(content, { title: "设置" });
-}
-
-/**
- * “当前阶段”单选组：设置页与首次引导共用，仅 data-action 不同。
- *
- * @param {string} action 点击时分发的动作名
- * @returns {string} 单选组 HTML
- */
-function renderStageSelector(action) {
-  const current = state.settings.careerStage;
-  return `<div class="segmented" role="radiogroup" aria-label="当前阶段">${CAREER_STAGES.map((id) => `<button type="button" role="radio" aria-checked="${current === id}" tabindex="${current === id ? "0" : "-1"}" class="${current === id ? "is-active" : ""}" data-action="${action}" data-value="${id}"><span>${CAREER_STAGE_LABELS[id].label}</span><small>${CAREER_STAGE_LABELS[id].hint}</small></button>`).join("")}</div>`;
 }
 
 function renderToggle(id, label, description) {
@@ -708,9 +773,9 @@ function renderHistoryModal(session) {
     <div class="modal-actions"><button class="button button-secondary" type="button" data-action="close-modal">关闭</button></div></section></div>`;
 }
 
-/** 首次引导：训练目标、怎么练、选择当前阶段。 */
+/** 首次引导：训练目标、怎么练、先做画像调研（出题比例与场景都按画像来）。 */
 function renderOnboarding() {
-  return `<div class="modal-backdrop onboarding-backdrop"><section class="modal onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" data-modal-panel><img src="/icons/icon.svg" alt="" width="58" height="58"><p class="eyebrow">首次使用</p><h2 id="onboarding-title">从不会开口，到能说会道</h2><div class="principle-list"><div><span>01</span><p><strong>训练目标</strong>从“不知道怎么开口”练到“能说会道”，终点是能带团队、见投资人、对外讲清楚一件事的创业者。</p></div><div><span>02</span><p><strong>怎么练</strong>先学一种表达结构（共 30 课），再在学术、生活、转化、创业四条线的真实场合里限时开口、被打断、回听自查、重讲。</p></div><div><span>03</span><p><strong>选择当前阶段</strong>它决定四条线的出题比例，之后可以在设置里随时修改。数据只留在当前设备。</p></div></div><div class="onboarding-choice"><span>当前阶段</span>${renderStageSelector("onboarding-stage")}</div><button class="button button-primary button-large" type="button" data-action="complete-onboarding">开始训练${icon("arrowRight")}</button></section></div>`;
+  return `<div class="modal-backdrop onboarding-backdrop"><section class="modal onboarding" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" data-modal-panel><img src="/icons/icon.svg" alt="" width="58" height="58"><p class="eyebrow">首次使用</p><h2 id="onboarding-title">从不会开口，到能说会道</h2><div class="principle-list"><div><span>01</span><p><strong>训练目标</strong>从“不知道怎么开口”练到“能说会道”，终点是能带团队、见投资人、对外讲清楚一件事的创业者。</p></div><div><span>02</span><p><strong>怎么练</strong>先学一种表达结构（共 30 课），再在学术、生活、转化、创业四条线的真实场合里限时开口、被打断、回听自查、重讲。</p></div><div><span>03</span><p><strong>先让系统了解你</strong>做一次画像调研：你是谁、想提高什么、接下来要面对哪些场合。开启 AI 后，出题比例、课程示范和练习题都按画像来写。数据只留在当前设备。</p></div></div><div class="drill-actions"><button class="button button-primary button-large" type="button" data-action="complete-onboarding" data-next="profile">开始画像调研（约 3 分钟）${icon("arrowRight")}</button><button class="button button-ghost" type="button" data-action="complete-onboarding">先跳过，直接开始</button></div></section></div>`;
 }
 
 function render() {
@@ -734,6 +799,8 @@ function render() {
     root.innerHTML = renderHistory();
   } else if (view === "ability") {
     root.innerHTML = renderAbility();
+  } else if (view === "profile") {
+    root.innerHTML = renderShell(agent.renderProfilePage(), { title: "我的画像" });
   } else {
     root.innerHTML = renderSettings();
   }
@@ -742,6 +809,8 @@ function render() {
   arena.afterRender();
   lessons.afterRender();
   applyRateBars(root);
+  // 每次渲染后检查是否需要后台补题（AI 未开启或正在生成时什么也不做）
+  agent.schedule();
   const modal = root.querySelector("[data-modal-panel]");
   const shell = root.querySelector(".app-shell");
   const skipLink = document.querySelector(".skip-link");
@@ -837,11 +906,9 @@ function prefersReducedMotion() {
 }
 
 /**
- * 首页抽题：从已学范式中按阶段比例、弱项与复练计划选一道题，轮转 5 秒后定格。
- *
- * @param {{ mode?: string }} options 本次抽题对应的回合模式
+ * 首页抽题：从已学范式中按画像决定的线比例、弱项与复练计划选一道题，轮转 5 秒后定格。
  */
-async function runTopicDraw({ mode = state.homeMode } = {}) {
+async function runTopicDraw() {
   const selection = selectPracticeCard({
     drills: state.drills,
     learned: learnedParadigms(state.lessonRuns),
@@ -852,11 +919,10 @@ async function runTopicDraw({ mode = state.homeMode } = {}) {
     showToast("先学完第 1 课，练习题才会出现。", "danger");
     return;
   }
-  const sequence = drawSequence({ cards: PRACTICE_CARDS, winner: selection.card });
+  const sequence = drawSequence({ cards: allPracticeCards(), winner: selection.card });
   const reducedMotion = prefersReducedMotion();
   const revision = ++topicDrawRevision;
   state.topicDraw = {
-    mode,
     status: reducedMotion ? "settled" : "spinning",
     startedAt: performance.now(),
     winnerId: selection.card.id,
@@ -870,7 +936,7 @@ async function runTopicDraw({ mode = state.homeMode } = {}) {
   render();
   if (reducedMotion) return;
   await new Promise((resolve) => setTimeout(resolve, TOPIC_DRAW_DURATION_MS));
-  if (revision !== topicDrawRevision || state.homeMode !== mode) return;
+  if (revision !== topicDrawRevision) return;
   state.topicDraw = { ...state.topicDraw, status: "settled" };
   state.pendingAnnouncement = `已抽中${selection.card.title}`;
   render();
@@ -884,7 +950,6 @@ async function startRevisit() {
   if (!selection.card) return;
   resetTopicDraw();
   await arena.startDrill(selection.card, {
-    mode: state.homeMode,
     selectionReason: selection.reason,
     revisitOf: selection.revisitOf,
     avoidPressures: selection.avoidPressures,
@@ -898,11 +963,11 @@ async function startRevisit() {
  */
 async function practiceParadigm(paradigmId) {
   const lastRun = [...state.lessonRuns].reverse().find((run) => run.schemaVersion === 2 && run.paradigmId === paradigmId);
-  const cards = PRACTICE_CARDS.filter((card) => card.paradigmId === paradigmId && card.id !== lastRun?.transferCardId);
+  const cards = allPracticeCards().filter((card) => card.paradigmId === paradigmId && card.id !== lastRun?.transferCardId);
   const selection = selectPracticeCard({ cards, drills: state.drills, learned: new Set([paradigmId]), careerStage: state.settings.careerStage });
   if (!selection) return;
   resetTopicDraw();
-  await arena.startDrill(selection.card, { mode: state.homeMode, selectionReason: "学完立即练习 · 换一个语境、没有提示、会被打断" });
+  await arena.startDrill(selection.card, { selectionReason: "学完立即练习 · 换一个语境、没有提示、会被打断" });
 }
 
 async function startDrawnTopic() {
@@ -914,7 +979,6 @@ async function startDrawnTopic() {
   }
   resetTopicDraw();
   await arena.startDrill(card, {
-    mode: draw.mode,
     selectionReason: draw.selectionReason,
     revisitOf: draw.revisitOf,
     avoidPressures: draw.avoidPressures,
@@ -942,10 +1006,6 @@ async function updateSetting(id, value) {
   const settings = { ...state.settings, [id]: value };
   await saveSettings(settings);
   state.settings = settings;
-  if (id === "defaultMode") {
-    resetTopicDraw();
-    state.homeMode = value;
-  }
   applySettings();
 }
 
@@ -1003,36 +1063,24 @@ root.addEventListener("click", async (event) => {
     await arena.handleAction(action, control);
   } else if (action.startsWith("lesson-")) {
     await lessons.handleAction(action, control);
+  } else if (action.startsWith("profile-") || action.startsWith("ai-")) {
+    await agent.handleAction(action, control);
   } else if (action === "resume-drill") {
     navigate("drill");
   } else if (action === "resume-lesson") {
     navigate("lesson");
   } else if (action === "start-revisit") {
     await startRevisit();
-  } else if (action === "setting-stage" || action === "onboarding-stage") {
-    await updateSetting("careerStage", control.dataset.value);
-    resetTopicDraw();
-    // 重渲染后把焦点还给同一个选项，方向键切换时不丢焦点
-    state.pendingFocus = { type: "control", descriptor: describeControl(control) };
-    render();
   } else if (action === "navigate") {
     navigate(control.dataset.view);
-  } else if (action === "home-mode") {
-    if (state.homeMode !== control.dataset.value) resetTopicDraw();
-    state.homeMode = control.dataset.value;
-    // 与阶段选择一致：重渲染后把焦点还给同一个选项，方向键切换时不丢焦点
-    state.pendingFocus = { type: "control", descriptor: describeControl(control) };
-    render();
-  } else if (action === "setting-mode") {
-    await updateSetting("defaultMode", control.dataset.value);
-    state.pendingFocus = { type: "control", descriptor: describeControl(control) };
-    render();
   } else if (action === "explore-topics") {
     // 抽题动画持续 5 秒，不能占住互斥锁，否则期间其他操作都会被吞掉
     void runTopicDraw().catch((error) => showToast(error?.message || "抽题失败，请重试。", "danger"));
   } else if (action === "start-home") {
     if (currentTopicDraw()?.status !== "settled") {
       void runTopicDraw().catch((error) => showToast(error?.message || "抽题失败，请重试。", "danger"));
+      // 从行动卡的“先练一回合”进来时，把练习区滚到眼前（抽题的第一帧已同步渲染）
+      if (control.dataset.scroll === "practice") root.querySelector("#practice-entry")?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" });
     } else {
       await startDrawnTopic();
     }
@@ -1066,8 +1114,13 @@ root.addEventListener("click", async (event) => {
   } else if (action === "complete-onboarding") {
     await updateSetting("onboardingComplete", true);
     state.pendingFocus = { type: "main" };
-    state.pendingAnnouncement = "首次设置已完成，已进入今日训练";
-    render();
+    if (control.dataset.next === "profile") {
+      state.pendingAnnouncement = "首次设置已完成，进入画像调研";
+      await agent.handleAction("profile-start", control);
+    } else {
+      state.pendingAnnouncement = "首次设置已完成，已进入今日训练";
+      render();
+    }
   }
   } catch (error) {
     showToast(error?.message || "操作未完成，请重试。", "danger");
@@ -1081,7 +1134,7 @@ root.addEventListener("click", async (event) => {
 
 root.addEventListener("input", (event) => {
   const target = event.target;
-  if (arena.handleInput(target) || lessons.handleInput(target)) {
+  if (arena.handleInput(target) || lessons.handleInput(target) || agent.handleInput(target)) {
     return;
   }
   if (target.matches("[data-history-filter='query']")) {
@@ -1115,7 +1168,9 @@ root.addEventListener("change", async (event) => {
     target.disabled = true;
   }
   try {
-  if (target.matches("[data-history-filter]")) {
+  if (target.matches("[data-ai-consent], [data-ai-provider]")) {
+    await agent.handleChange(target);
+  } else if (target.matches("[data-history-filter]")) {
     state.historyFilters[target.dataset.historyFilter] = target.value;
     render();
   } else if (target.matches("[data-setting]")) {
@@ -1233,7 +1288,8 @@ window.addEventListener("beforeunload", (event) => {
  * 进行中的回合或课程若不是新版（schemaVersion 2），说明启动归档失败，按无进行中处理。
  */
 async function loadLocalState() {
-  [state.settings, state.sessions, state.storage, state.drills, state.activeDrill, state.lessonRuns, state.activeLesson] = await Promise.all([
+  // 生成题卡由存储层在读取回合与课程之前先注册，这里并行读取即可
+  [state.settings, state.sessions, state.storage, state.drills, state.activeDrill, state.lessonRuns, state.activeLesson, state.profile, state.generatedCards] = await Promise.all([
     loadSettings(),
     loadSessions(),
     storageSummary(),
@@ -1241,11 +1297,12 @@ async function loadLocalState() {
     loadActiveDrill(),
     loadLessonRuns(),
     loadActiveLesson(),
+    loadProfile(),
+    loadGeneratedCards(),
   ]);
   if (state.activeDrill?.schemaVersion !== 2) state.activeDrill = null;
   if (state.activeLesson?.schemaVersion !== 2) state.activeLesson = null;
   state.sessions.sort((left, right) => sessionTimestamp(left) - sessionTimestamp(right));
-  state.homeMode = state.settings.defaultMode;
 }
 
 async function initialize() {
@@ -1263,6 +1320,8 @@ async function initialize() {
   }
   render();
   if (archivedLegacy) showToast("旧版训练的进行中进度已归档到历史。");
+  // AI 状态查询不阻塞首屏；服务端不可用时 AI 功能自动隐藏
+  void agent.init();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {
       // Offline installation is optional during local development.

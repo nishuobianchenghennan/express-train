@@ -2,6 +2,7 @@ import path from "node:path";
 
 import express from "express";
 
+import { createAiRouter } from "./ai/routes.js";
 import { resolveStaticRoot } from "./config.js";
 
 export function createApp() {
@@ -28,6 +29,8 @@ export function createApp() {
       timestamp: new Date().toISOString(),
     });
   });
+
+  app.use("/api/ai", createAiRouter());
 
   app.use(express.static(staticRoot, {
     extensions: ["html"],

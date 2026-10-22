@@ -12,7 +12,7 @@
 import { LINES, LINE_WEIGHTS } from "../curriculum/contexts.js";
 import { CHECKS, PRESSURES } from "../curriculum/checks.js";
 import { PRESSURE_CHECK_ID } from "../curriculum/ids.js";
-import { PARADIGM_MAP, PRACTICE_CARDS, PRACTICE_CARD_MAP, isStepKey } from "../curriculum/index.js";
+import { PARADIGM_MAP, PRACTICE_CARD_MAP, allPracticeCards, isGeneratedCard, isStepKey } from "../curriculum/index.js";
 
 const DAY_MS = 86_400_000;
 export const DRILL_SCHEMA_VERSION = 2;
@@ -32,6 +32,10 @@ const WEAKNESS_WINDOW = 20;
 const WEAKNESS_THRESHOLD = 70;
 const WEAKNESS_PROBABILITY = 0.6;
 const RECENT_LEARNED_WEIGHT = 1.5;
+// 还没练过的 AI 生成题优先出现，让每次打开都有新内容；
+// 弱项变化后，不再考核当前弱项的旧备题只保留一半的加权
+const FRESH_GENERATED_WEIGHT = 3;
+const STALE_GENERATED_WEIGHT = 1.5;
 const DEDUPE_WINDOWS = [30, 10, 0];
 
 function randomId() {
@@ -301,12 +305,12 @@ function weightedPick(items, weightOf, random) {
  * 练习选题（设计 §7.5）。
  *
  * 顺序：已学范式候选 → 到期复练（50%）→ 去重（30 → 10 → 不排除）→ 按线权重选线
- *   → 交错 / 难度 / 弱项（软过滤）→ 刚学范式 ×1.5 加权抽取。
+ *   → 交错 / 难度 / 弱项（软过滤）→ 加权抽取（刚学范式 ×1.5，没练过的 AI 生成题 ×3）。
  *
- * @param {object} options cards / drills / learned（已学范式）/ recent（刚学范式）/ careerStage / now / random
+ * @param {object} options cards（默认精选 + 生成题卡）/ drills / learned（已学范式）/ recent（刚学范式）/ careerStage / now / random
  * @returns {{ card: object, reason: string, revisitOf: string|null, avoidPressures: string[] }|null} 没学任何范式时返回 null
  */
-export function selectPracticeCard({ cards = PRACTICE_CARDS, drills = [], learned = new Set(), recent = new Set(), careerStage = "phd", now = Date.now(), random = Math.random } = {}) {
+export function selectPracticeCard({ cards = allPracticeCards(), drills = [], learned = new Set(), recent = new Set(), careerStage = "phd", now = Date.now(), random = Math.random } = {}) {
   const pool = cards.filter((card) => card.status === "active" && learned.has(card.paradigmId));
   if (!pool.length) return null;
   const done = completedDrills(drills);
@@ -345,13 +349,22 @@ export function selectPracticeCard({ cards = PRACTICE_CARDS, drills = [], learne
     }
   }
 
-  const card = weightedPick(candidates, (item) => (recent.has(item.paradigmId) ? RECENT_LEARNED_WEIGHT : 1), random);
+  // 只看已开始过的回合（含进行中与放弃），开过一次就不再算新题
+  const played = new Set(drills.map((drill) => drill.cardId));
+  const isFresh = (item) => isGeneratedCard(item) && !played.has(item.id);
+  const freshWeight = (item) => {
+    if (!isFresh(item)) return 1;
+    return !weakness || cardTargetsWeakness(item, weakness) ? FRESH_GENERATED_WEIGHT : STALE_GENERATED_WEIGHT;
+  };
+  const weightOf = (item) => (recent.has(item.paradigmId) ? RECENT_LEARNED_WEIGHT : 1) * freshWeight(item);
+  const card = weightedPick(candidates, weightOf, random);
   if (recent.has(card.paradigmId)) reasons.push("刚学的范式");
+  if (isFresh(card)) reasons.push("为你生成的新题");
   return { card, reason: reasons.join(" · "), revisitOf: null, avoidPressures: [] };
 }
 
 /** 首页抽题动画：在候选卡中插入选中卡，返回卡序列与中奖位置。 */
-export function drawSequence({ cards = PRACTICE_CARDS, winner, length = 12, random = Math.random } = {}) {
+export function drawSequence({ cards = allPracticeCards(), winner, length = 12, random = Math.random } = {}) {
   const others = cards.filter((card) => card.id !== winner.id);
   // 没有其他候选卡时用中奖卡自己填充，避免出现 undefined
   const filler = others.length ? others : [winner];

@@ -1,13 +1,16 @@
 /**
  * 学习模式的界面与控制器：30 课地图 + 单课工作台。
  */
-import { CONTEXT_MAP, PARADIGM_MAP, PRACTICE_CARD_MAP, checkDetail, checkLabel } from "../curriculum/index.js";
+import { CONTEXT_MAP, PARADIGM_MAP, PRACTICE_CARD_MAP, checkDetail, checkLabel, isGeneratedCard } from "../curriculum/index.js";
 import { LINES } from "../curriculum/contexts.js";
-import { STAGE_SIZES } from "../curriculum/ids.js";
+import { STAGE_NAMES, STAGE_SIZES } from "../curriculum/ids.js";
 import {
-  LESSON_ORDER, LESSON_TAKE_GRACE_SECONDS, advanceLesson, checkKeys, createLessonRun, lessonProgress, lessonTakeSlot,
-  missedSteps, recommendedLesson, stepCoverage, stepKey, validateLessonPhase,
+  LESSON_ORDER, LESSON_TAKE_GRACE_SECONDS, advanceLesson, checkKeys, createLessonRun, isTransferCandidate, lessonProgress, lessonTakeSlot,
+  missedSteps, pickLessonExample, recommendedLesson, stepCoverage, stepKey, validateLessonPhase,
 } from "./lesson-engine.js";
+
+// 还在这两个阶段时，迁移题可以被替换成刚生成的个性化题目；进入复述后就不再换
+const TRANSFER_SWAPPABLE_PHASES = new Set(["intro", "model"]);
 import { createTakeRunner } from "./recorder.js";
 
 const TICK_MS = 250;
@@ -24,6 +27,51 @@ const TAKE_LABELS = Object.freeze({ retell1: "第一次复述", retell2: "优化
 function formatClock(totalSeconds) {
   const absolute = Math.max(0, Math.round(totalSeconds));
   return `${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}`;
+}
+
+/**
+ * 本课的示范：课程记录引用了 AI 示范题卡时用它（按画像生成的情境、人物、示范回答与反例），
+ * 否则用课内的精选示范。表达结构、步骤与经典框架始终来自课本身。
+ *
+ * @returns {object} line / lineLabel / contextLabel / speakSeconds / situation / role / counterpart / hard / listener / why / model / weak / generated / personalNote
+ */
+function lessonExample(run, lesson) {
+  const card = run?.exampleCardId ? PRACTICE_CARD_MAP.get(run.exampleCardId) : null;
+  if (card) {
+    return {
+      generated: true,
+      line: card.line,
+      lineLabel: card.lineLabel,
+      contextLabel: card.contextLabel,
+      speakSeconds: card.speakSeconds,
+      situation: card.situation,
+      role: card.role,
+      counterpart: card.counterpart,
+      hard: card.tension,
+      listener: card.mindset,
+      why: card.prepGuide.whyStructure,
+      model: card.bestAnswer,
+      weak: card.badExample,
+      personalNote: card.personalNote,
+    };
+  }
+  const context = CONTEXT_MAP.get(lesson.exampleContextId);
+  return {
+    generated: false,
+    line: context.line,
+    lineLabel: LINES[context.line].label,
+    contextLabel: context.label,
+    speakSeconds: lesson.example.speakSeconds,
+    situation: lesson.example.situation,
+    role: context.role,
+    counterpart: context.counterpart,
+    hard: lesson.hard,
+    listener: lesson.listener,
+    why: lesson.why,
+    model: lesson.model,
+    weak: lesson.weak,
+    personalNote: "",
+  };
 }
 
 /**
@@ -71,7 +119,9 @@ export function createLessonController(ctx) {
     const lesson = PARADIGM_MAP.get(paradigmId);
     if (!lesson) return;
     confirmAbandon = false;
-    await persist(createLessonRun(lesson, { runs: state.lessonRuns }));
+    // 有为这一课预先生成、还没用过的 AI 示范就用它，否则用课内的精选示范
+    const exampleCard = pickLessonExample(lesson, { runs: state.activeLesson ? [...state.lessonRuns, state.activeLesson] : state.lessonRuns });
+    await persist(createLessonRun(lesson, { runs: state.lessonRuns, exampleCard }));
     ctx.navigate("lesson");
   }
 
@@ -135,7 +185,7 @@ export function createLessonController(ctx) {
     if (!run || !lesson || state.view !== "lesson") return;
     const elapsed = takes.elapsedSeconds();
     if (elapsed == null) return;
-    const target = run.phase === "transfer" ? PRACTICE_CARD_MAP.get(run.transferCardId).speakSeconds : lesson.example.speakSeconds;
+    const target = run.phase === "transfer" ? PRACTICE_CARD_MAP.get(run.transferCardId).speakSeconds : lessonExample(run, lesson).speakSeconds;
     const clock = ctx.root.querySelector("[data-lesson-clock]");
     if (clock) clock.textContent = formatClock(elapsed);
     const over = ctx.root.querySelector("[data-lesson-over]");
@@ -221,6 +271,21 @@ export function createLessonController(ctx) {
     return true;
   }
 
+  /**
+   * 把进行中课程的迁移题换成一张新题卡（通常是刚生成的个性化题目）。
+   * 只在“看懂场景 / 拆解示范”阶段替换，且新题卡必须是本课合法的迁移题。
+   *
+   * @returns {boolean} 是否已替换
+   */
+  function swapTransferCard(runId, cardId) {
+    const run = state.activeLesson;
+    const card = PRACTICE_CARD_MAP.get(cardId);
+    const paradigm = activeLesson();
+    if (!run || run.runId !== runId || !TRANSFER_SWAPPABLE_PHASES.has(run.phase) || !card || !paradigm || !isTransferCandidate(paradigm, card)) return false;
+    updateRun({ transferCardId: card.id }, { render: state.view === "lesson" });
+    return true;
+  }
+
   function handleInput(target) {
     if (!target.matches("[data-lesson-text]")) return false;
     clearTimeout(textTimer);
@@ -236,22 +301,23 @@ export function createLessonController(ctx) {
     return `<ol class="drill-steps" aria-label="学习进度">${STEP_GROUPS.map((group, index) => `<li class="${index < currentIndex ? "is-done" : index === currentIndex ? "is-current" : ""}"><span>${index + 1}</span>${group.label}</li>`).join("")}</ol>`;
   }
 
-  /** 示范情境：来自课内的 example，不再依赖示范卡。 */
-  function renderExample(lesson, { compact = false } = {}) {
-    const context = CONTEXT_MAP.get(lesson.exampleContextId);
+  /** 示范情境：AI 示范题卡或课内的精选示范（见 lessonExample）。 */
+  function renderExample(example, { compact = false } = {}) {
     return `<section class="drill-situation${compact ? " is-compact" : ""}">
-      <div class="drill-tags"><span class="line-tag line-${context.line}">示范场景 · ${escapeHtml(LINES[context.line].label)} · ${escapeHtml(context.label)}</span><span>建议 ${lesson.example.speakSeconds} 秒</span></div>
-      ${compact ? "" : `<p>${escapeHtml(lesson.example.situation)}</p>`}
-      <dl><div><dt>你的身份</dt><dd>${escapeHtml(context.role)}</dd></div><div><dt>对象</dt><dd>${escapeHtml(context.counterpart)}</dd></div></dl>
+      <div class="drill-tags"><span class="line-tag line-${example.line}">示范场景 · ${escapeHtml(example.lineLabel)} · ${escapeHtml(example.contextLabel)}</span>${example.generated ? `<span class="ai-tag">AI 按你的画像生成 · 情境为模拟</span>` : ""}<span>建议 ${example.speakSeconds} 秒</span></div>
+      ${compact ? "" : `<p>${escapeHtml(example.situation)}</p>`}
+      ${!compact && example.personalNote ? `<p class="ai-note">为什么是这个场景：${escapeHtml(example.personalNote)}</p>` : ""}
+      <dl><div><dt>你的身份</dt><dd>${escapeHtml(example.role)}</dd></div><div><dt>对象</dt><dd>${escapeHtml(example.counterpart)}</dd></div></dl>
     </section>`;
   }
 
   /** 迁移题卡：换到另一条线的真实题目。 */
   function renderTransferCard(card, { compact = false } = {}) {
     return `<section class="drill-situation${compact ? " is-compact" : ""}">
-      <div class="drill-tags"><span class="line-tag line-${card.line}">迁移 · ${escapeHtml(card.lineLabel)} · ${escapeHtml(card.contextLabel)}</span><span>建议 ${card.speakSeconds} 秒</span></div>
+      <div class="drill-tags"><span class="line-tag line-${card.line}">迁移 · ${escapeHtml(card.lineLabel)} · ${escapeHtml(card.contextLabel)}</span>${isGeneratedCard(card) ? `<span class="ai-tag">AI 为你生成 · 情境为模拟</span>` : ""}<span>建议 ${card.speakSeconds} 秒</span></div>
       <h2>${escapeHtml(card.title)}</h2>
       ${compact ? "" : `<p>${escapeHtml(card.situation)}</p>`}
+      ${!compact && isGeneratedCard(card) && card.personalNote ? `<p class="ai-note">为什么是这道题：${escapeHtml(card.personalNote)}</p>` : ""}
       <dl><div><dt>对象</dt><dd>${escapeHtml(card.counterpart)}</dd></div><div><dt>目标</dt><dd>${escapeHtml(card.goal)}</dd></div></dl>
     </section>`;
   }
@@ -260,24 +326,25 @@ export function createLessonController(ctx) {
     return `<ol class="structure-steps">${lesson.steps.map((item, index) => `<li class="step-${index}${highlight.has(index) ? " is-missed" : ""}"><span class="step-index">${index + 1}</span><div><strong>${escapeHtml(item.label)}</strong>${purposes ? `<p>${escapeHtml(item.purpose)}</p>` : ""}${phrases ? `<em>句式：${escapeHtml(item.phrase)}</em>` : ""}</div></li>`).join("")}</ol>`;
   }
 
-  function renderModelBreakdown(lesson) {
-    return `<div class="model-breakdown">${lesson.model.map((item) => `<div class="model-line step-${item.step}"><span class="step-chip step-${item.step}">${item.step + 1} ${escapeHtml(lesson.steps[item.step].label)}</span><p>${escapeHtml(item.text)}</p><small>${icon("info")}${escapeHtml(item.why)}</small></div>`).join("")}</div>`;
+  function renderModelBreakdown(lesson, example) {
+    return `<div class="model-breakdown">${example.model.map((item) => `<div class="model-line step-${item.step}"><span class="step-chip step-${item.step}">${item.step + 1} ${escapeHtml(lesson.steps[item.step].label)}</span><p>${escapeHtml(item.text)}</p><small>${icon("info")}${escapeHtml(item.why)}</small></div>`).join("")}</div>`;
   }
 
-  function modelText(lesson) {
-    return lesson.model.map((item) => item.text).join("");
+  function modelText(example) {
+    return example.model.map((item) => item.text).join("");
   }
 
   function renderIntro(run, lesson) {
-    return `${renderExample(lesson)}
+    const example = lessonExample(run, lesson);
+    return `${renderExample(example)}
       <section class="drill-panel lesson-insight">
-        <div><h3>${icon("alert")}这个场景难在哪</h3><p>${escapeHtml(lesson.hard)}</p></div>
-        <div><h3>${icon("target")}对方此刻在想什么</h3><p>${escapeHtml(lesson.listener)}</p></div>
+        <div><h3>${icon("alert")}这个场景难在哪</h3><p>${escapeHtml(example.hard)}</p></div>
+        <div><h3>${icon("target")}对方此刻在想什么</h3><p>${escapeHtml(example.listener)}</p></div>
       </section>
       <section class="drill-panel">
         <p class="eyebrow">表达结构</p>
         <h3 class="structure-title">${escapeHtml(lesson.structure)}</h3>
-        <p class="lesson-why">${escapeHtml(lesson.why)}</p>
+        <p class="lesson-why">${escapeHtml(example.why)}</p>
         <p class="lesson-when"><strong>什么时候用：</strong>${escapeHtml(lesson.whenToUse)}</p>
         ${lesson.frameworks.length ? `<div class="lesson-frameworks"><p class="eyebrow">经典框架</p><ul>${lesson.frameworks.map((item) => `<li><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.source)}</small><p>${escapeHtml(item.mapping)}</p></li>`).join("")}</ul></div>` : ""}
         ${renderSteps(lesson)}
@@ -286,20 +353,21 @@ export function createLessonController(ctx) {
   }
 
   function renderModel(run, lesson) {
-    return `${renderExample(lesson, { compact: true })}
+    const example = lessonExample(run, lesson);
+    return `${renderExample(example, { compact: true })}
       <section class="drill-panel">
         <p class="eyebrow">示范回答 · 先完整读一遍，最好读出声</p>
-        <blockquote class="model-full">${escapeHtml(modelText(lesson))}</blockquote>
+        <blockquote class="model-full">${escapeHtml(modelText(example))}</blockquote>
         <p class="drill-hint">示范中的人名、数字和经历都是模拟的，用来展示结构，不代表真实数据。</p>
       </section>
       <section class="drill-panel">
         <h3>${icon("list")}逐句拆解：每一句在做什么、为什么有效</h3>
-        ${renderModelBreakdown(lesson)}
+        ${renderModelBreakdown(lesson, example)}
       </section>
       <section class="drill-panel weak-example">
         <h3>${icon("x")}对比：常见的糟糕说法</h3>
-        <blockquote>${escapeHtml(lesson.weak.text)}</blockquote>
-        <ul>${lesson.weak.problems.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+        <blockquote>${escapeHtml(example.weak.text)}</blockquote>
+        <ul>${example.weak.problems.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
       </section>
       <div class="drill-actions"><button class="button button-primary button-large" type="button" data-action="lesson-advance">${icon("check")}我理解了，开始复述</button></div>`;
   }
@@ -318,7 +386,8 @@ export function createLessonController(ctx) {
     const slot = run.phase;
     const isTransfer = slot === "transfer";
     const transferCard = PRACTICE_CARD_MAP.get(run.transferCardId);
-    const speakSeconds = isTransfer ? transferCard.speakSeconds : lesson.example.speakSeconds;
+    const example = lessonExample(run, lesson);
+    const speakSeconds = isTransfer ? transferCard.speakSeconds : example.speakSeconds;
     const missed = slot === "retell2" ? new Set(missedSteps(run, "retell1").map((item) => item.index)) : new Set();
     const running = takes.isRunning();
     const intro = slot === "retell1"
@@ -329,7 +398,7 @@ export function createLessonController(ctx) {
     const scaffold = slot === "retell1"
       ? renderSteps(lesson, { purposes: false })
       : renderSteps(lesson, { phrases: false, purposes: false, highlight: missed });
-    return `${isTransfer ? renderTransferCard(transferCard) : renderExample(lesson, { compact: true })}
+    return `${isTransfer ? renderTransferCard(transferCard) : renderExample(example, { compact: true })}
       ${isTransfer ? `<section class="drill-panel"><h3>${icon("shuffle")}迁移提示</h3><p>${escapeHtml(lesson.transfer)}</p></section>` : ""}
       <section class="drill-stage-card${running ? " is-live" : ""}">
         <p class="drill-prep-tip">${escapeHtml(intro)}</p>
@@ -370,14 +439,15 @@ export function createLessonController(ctx) {
     const judged = checkKeys(run, run.phase).every((key) => typeof run.checks[slot][key] === "boolean");
     const missed = judged ? missedSteps(run, slot) : [];
     const nextLabel = run.phase === "check1" ? "优化后再讲一遍" : run.phase === "check2" ? "换一个场景迁移" : "完成这一课";
-    return `${isTransfer ? renderTransferCard(transferCard, { compact: true }) : renderExample(lesson, { compact: true })}
+    const example = lessonExample(run, lesson);
+    return `${isTransfer ? renderTransferCard(transferCard, { compact: true }) : renderExample(example, { compact: true })}
       <section class="drill-panel">
         <h3>${icon("history")}回听${TAKE_LABELS[slot]}，对照结构自查</h3>
         <p class="drill-hint">先完整回听一遍再判断。<strong>拿不准就算没做到</strong>。</p>
         <div class="drill-audio-row">${renderAudio(run.takes[slot], TAKE_LABELS[slot])}</div>
         <div class="check-list">${stepRows}</div>
         ${isTransfer ? `<p class="eyebrow check-subhead">这个场景的关键行为</p><div class="check-list">${keyRows}</div>` : ""}
-        <details class="structure-reference"><summary>${icon("book")}${isTransfer ? "参考：示范场景的回答（不同场景，同一结构）" : "对照示范回答"}</summary>${renderModelBreakdown(lesson)}</details>
+        <details class="structure-reference"><summary>${icon("book")}${isTransfer ? "参考：示范场景的回答（不同场景，同一结构）" : "对照示范回答"}</summary>${renderModelBreakdown(lesson, example)}</details>
       </section>
       ${judged ? `<section class="drill-panel"><h3>${icon("target")}下一次怎么优化</h3>${missed.length ? `<ul class="fix-list">${missed.map((item) => `<li><strong>补上「${escapeHtml(item.label)}」</strong><span>可以这样说：${escapeHtml(item.phrase)}</span></li>`).join("")}</ul>` : `<p>结构的每一步都讲到了。${run.phase === "check3" ? "你已经能把这个结构迁移到另一条线的场景。" : "下一次试着讲得更自然、更像自己的话。"}</p>`}</section>` : ""}
       ${run.phase === "check3" ? `<section class="drill-panel"><label class="field"><span>这一课带走的一句话（例如这个结构最关键的一步）</span><textarea rows="2" data-lesson-text placeholder="例如：坏消息先说结论，再分开已知和未知">${escapeHtml(run.lesson)}</textarea></label></section>` : ""}
@@ -425,12 +495,10 @@ export function createLessonController(ctx) {
     </div>`;
   }
 
-  return { afterRender, handleAction, handleInput, isBusy: () => takes.isBusy(), renderWorkspace, startLesson };
+  return { afterRender, handleAction, handleInput, isBusy: () => takes.isBusy(), renderWorkspace, startLesson, swapTransferCard };
 }
 
 const LESSON_TAKE_SLOTS = new Set(["retell1", "retell2", "transfer"]);
-
-const STAGE_LABELS = Object.freeze(["敢开口", "讲清楚", "能交锋", "能推动", "创业者"]);
 
 /** 30 课地图：按五个阶段排列，标出已学、推荐与进行中的课。 */
 export function renderCurriculumMap({ runs, activeRun }, { escapeHtml }) {
@@ -442,13 +510,13 @@ export function renderCurriculumMap({ runs, activeRun }, { escapeHtml }) {
     const items = LESSON_ORDER.slice(offset, offset + size);
     offset += size;
     const learned = items.filter((item) => progress[item.id]).length;
-    return `<section class="lesson-group"><h3><span>第 ${stageIndex + 1} 阶段 · ${STAGE_LABELS[stageIndex]}</span><small>${learned} / ${size}</small></h3><div class="lesson-grid">${items.map((item) => {
+    return `<section class="lesson-group"><h3><span>第 ${stageIndex + 1} 阶段 · ${STAGE_NAMES[stageIndex]}</span><small>${learned} / ${size}</small></h3><div class="lesson-grid">${items.map((item) => {
       const done = progress[item.id];
       const isActive = item.id === activeId;
       const state = isActive ? " is-active" : item === next && !activeId ? " is-next" : "";
-      // 进行中的课优先标“进行中”，并用 aria-current 告知读屏当前所在的一课
-      const status = isActive ? "进行中" : done ? `已学 ${done.completed} 次` : "未学";
-      return `<button type="button" class="lesson-tile${done ? " is-learned" : ""}${state}" data-action="lesson-start" data-paradigm="${item.id}"${isActive ? ' aria-current="step"' : ""}><span class="lesson-tile-head"><strong>${item.order}. ${escapeHtml(item.title)}</strong><span>${status}</span></span><small>${escapeHtml(item.structure)}</small></button>`;
+      // 进行中的课优先标“进行中”，并用 aria-current 告知读屏当前所在的一课；没学过的不再逐张写“未学”，只标出推荐的下一课
+      const status = isActive ? "进行中" : done ? `已学 ${done.completed} 次` : state === " is-next" ? "下一课" : "";
+      return `<button type="button" class="lesson-tile${done ? " is-learned" : ""}${state}" data-action="lesson-start" data-paradigm="${item.id}"${isActive ? ' aria-current="step"' : ""}><span class="lesson-tile-head"><strong>${item.order}. ${escapeHtml(item.title)}</strong>${status ? `<span>${status}</span>` : ""}</span><small>${escapeHtml(item.structure)}</small></button>`;
     }).join("")}</div></section>`;
   }).join("");
   return `<section class="learn-home">${groups}</section>`;

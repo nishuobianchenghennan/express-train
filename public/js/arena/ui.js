@@ -6,7 +6,7 @@
  */
 import { CHECKS } from "../curriculum/checks.js";
 import { LINES } from "../curriculum/contexts.js";
-import { PARADIGM_MAP, PRACTICE_CARD_MAP, checkDetail, checkLabel, isStepKey } from "../curriculum/index.js";
+import { PARADIGM_MAP, PRACTICE_CARD_MAP, checkDetail, checkLabel, isGeneratedCard, isStepKey } from "../curriculum/index.js";
 import { INDUSTRY_MAP } from "./industries.js";
 import {
   LEARN_SECONDS,
@@ -323,9 +323,10 @@ export function createArenaController(ctx) {
   function renderSituation(card, compact) {
     const industry = INDUSTRY_MAP.get(card.industryId);
     return `<section class="drill-situation${compact ? " is-compact" : ""}" aria-label="情境">
-      <div class="drill-tags"><span class="line-tag line-${card.line}">${escapeHtml(card.lineLabel)} · ${escapeHtml(card.contextLabel)}</span>${industry ? `<span class="industry-tag">${escapeHtml(industry.label)}</span>` : ""}<span>限时 ${card.speakSeconds} 秒</span></div>
+      <div class="drill-tags"><span class="line-tag line-${card.line}">${escapeHtml(card.lineLabel)} · ${escapeHtml(card.contextLabel)}</span>${industry ? `<span class="industry-tag">${escapeHtml(industry.label)}</span>` : ""}${isGeneratedCard(card) ? `<span class="ai-tag">AI 为你生成 · 情境为模拟</span>` : ""}<span>限时 ${card.speakSeconds} 秒</span></div>
       <h2>${escapeHtml(card.title)}</h2>
       ${compact ? "" : `<p>${escapeHtml(card.situation)}</p>`}
+      ${!compact && isGeneratedCard(card) && card.personalNote ? `<p class="ai-note">为什么是这道题：${escapeHtml(card.personalNote)}</p>` : ""}
       <dl><div><dt>你的身份</dt><dd>${escapeHtml(card.role)}</dd></div><div><dt>对象</dt><dd>${escapeHtml(card.counterpart)}</dd></div><div><dt>目标</dt><dd>${escapeHtml(card.goal)}</dd></div></dl>
     </section>`;
   }

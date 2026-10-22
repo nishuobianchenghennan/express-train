@@ -92,7 +92,7 @@ function checkContext(context, errors) {
   if (!Number.isInteger(context.speakSeconds) || context.speakSeconds < 30 || context.speakSeconds > 180) errors.push(`${where}：speakSeconds 必须为 30–180`);
 }
 
-function checkCard(card, contextMap, paradigmMap, industryIds, errors) {
+function checkCard(card, contextMap, paradigmMap, industryIds, errors, { generated = false } = {}) {
   const where = card.id ?? "未知题卡";
   const context = contextMap.get(card.contextId);
   const paradigm = paradigmMap.get(card.paradigmId);
@@ -100,7 +100,9 @@ function checkCard(card, contextMap, paradigmMap, industryIds, errors) {
     errors.push(`${where}：contextId 不存在`);
     return;
   }
-  if (!new RegExp(`^${context.id}-\\d{2}$`).test(card.id ?? "")) errors.push(`${where}：ID 必须形如 ${context.id}-01`);
+  // 精选题卡按语境编号（A01-01）；AI 生成题卡带 G 前缀的随机后缀（A01-G1a2b3c4d），两者不会重名
+  const idPattern = generated ? new RegExp(`^${context.id}-G[0-9a-f]{8}$`) : new RegExp(`^${context.id}-\\d{2}$`);
+  if (!idPattern.test(card.id ?? "")) errors.push(`${where}：ID 必须形如 ${generated ? `${context.id}-G1a2b3c4d` : `${context.id}-01`}`);
   if (!paradigm) errors.push(`${where}：paradigmId 指向的课尚未定义`);
   if (!context.paradigmIds.includes(card.paradigmId)) errors.push(`${where}：paradigmId 不在语境 ${context.id} 的 paradigmIds 中`);
   for (const key of ["title", "situation", "goal"]) {
@@ -151,6 +153,54 @@ function checkTransfer(paradigm, cards, contextMap, errors, { complete }) {
   } else if (complete && !crossLine.length) {
     errors.push(`${paradigm.id}：缺少不同线的迁移题卡`);
   }
+}
+
+// AI 生成题卡各字段的长度上限，防止异常输出撑坏界面或存储
+const GENERATED_TEXT_LIMITS = Object.freeze({ title: 60, situation: 500, goal: 160, role: 120, personalNote: 160 });
+// 按画像改写的对象、难点与对方心态；早期生成的题卡没有这三项，练习题卡可缺省，示范题卡必须有
+const GENERATED_PERSONA_LIMITS = Object.freeze({ counterpart: 120, tension: 300, mindset: 300 });
+// 按画像改写的场合名（界面上代替语境名）；早期生成的题卡没有，缺省时显示语境名
+const GENERATED_SCENE_LABEL_LIMIT = 16;
+const GENERATED_ITEM_LIMIT = 300;
+/** 生成题卡的用途：练习题，或一课的示范。 */
+export const GENERATED_PURPOSES = Object.freeze(["practice", "example"]);
+
+/**
+ * 校验一张 AI 生成的题卡：与精选题卡同一套结构规则，另加来源标记与长度上限。
+ *
+ * @param {object} card 原始题卡（未派生语境字段）
+ * @param {{ paradigms: object[], contexts: object[], industryIds?: Iterable<string> }} data 当前课程体系
+ * @returns {string[]} 错误描述；为空表示通过
+ */
+export function validateGeneratedCard(card, { paradigms, contexts, industryIds = [] }) {
+  const errors = [];
+  if (!card || typeof card !== "object" || Array.isArray(card)) return ["生成题卡不是对象"];
+  const where = card.id ?? "生成题卡";
+  if (card.origin !== "generated") errors.push(`${where}：origin 必须为 generated`);
+  if (card.purpose != null && !GENERATED_PURPOSES.includes(card.purpose)) errors.push(`${where}：purpose 无效`);
+  for (const [key, limit] of Object.entries(GENERATED_TEXT_LIMITS)) {
+    if (!isText(card[key])) errors.push(`${where}：缺少 ${key}`);
+    else if (card[key].length > limit) errors.push(`${where}：${key} 超过 ${limit} 字`);
+  }
+  for (const [key, limit] of Object.entries(GENERATED_PERSONA_LIMITS)) {
+    if (card[key] == null) {
+      if (card.purpose === "example") errors.push(`${where}：示范题卡缺少 ${key}`);
+    } else if (!isText(card[key])) errors.push(`${where}：${key} 不能为空`);
+    else if (card[key].length > limit) errors.push(`${where}：${key} 超过 ${limit} 字`);
+  }
+  if (card.sceneLabel != null && (!isText(card.sceneLabel) || card.sceneLabel.length > GENERATED_SCENE_LABEL_LIMIT)) {
+    errors.push(`${where}：sceneLabel 必须是不超过 ${GENERATED_SCENE_LABEL_LIMIT} 字的场合名`);
+  }
+  const nested = [
+    card.prepGuide?.questions?.who, card.prepGuide?.questions?.wants, card.prepGuide?.questions?.outcome, card.prepGuide?.whyStructure,
+    ...(card.prepGuide?.stepHints ?? []), ...(card.bestAnswer ?? []).flatMap((line) => [line?.text, line?.why]),
+    card.badExample?.text, ...(card.badExample?.problems ?? []), ...(card.study ?? []),
+  ];
+  if (nested.some((value) => typeof value === "string" && value.length > GENERATED_ITEM_LIMIT)) errors.push(`${where}：存在超过 ${GENERATED_ITEM_LIMIT} 字的字段`);
+  const contextMap = new Map(contexts.map((context) => [context.id, context]));
+  const paradigmMap = new Map(paradigms.map((paradigm) => [paradigm.id, paradigm]));
+  checkCard(card, contextMap, paradigmMap, new Set(industryIds), errors, { generated: true });
+  return errors;
 }
 
 /**

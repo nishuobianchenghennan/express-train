@@ -116,6 +116,11 @@ a:focus-visible {
   outline-offset: 2px;
 }
 
+/* 切换页面时程序会把焦点移到主内容区，作为读屏的起点；它不是可操作控件，不画焦点框 */
+.main-content:focus {
+  outline: none;
+}
+
 h1,
 h2,
 h3,
@@ -596,6 +601,7 @@ svg.icon {
 input[type="text"],
 input[type="search"],
 input[type="url"],
+input[type="password"],
 textarea,
 select {
   width: 100%;
@@ -1660,19 +1666,6 @@ input[type="range"] {
   color: var(--ink);
 }
 
-.onboarding-choice {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 17px;
-  text-align: left;
-}
-
-.onboarding-choice > span {
-  color: var(--ink-soft);
-  font-size: 12px;
-  font-weight: 700;
-}
-
 .record-title {
   display: flex;
   align-items: flex-start;
@@ -1882,7 +1875,7 @@ th {
     left: 0;
     display: grid;
     min-height: var(--mobile-nav);
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     border-top: 1px solid var(--line);
     background: rgb(255 255 255 / 96%);
     padding-bottom: env(safe-area-inset-bottom);
@@ -2159,29 +2152,6 @@ th {
   padding-top: 14px;
 }
 
-.topic-draw-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.topic-draw-head > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--primary);
-  font-weight: 800;
-}
-
-.topic-draw-head .icon {
-  width: 16px;
-  height: 16px;
-}
-
 .topic-draw-window {
   position: relative;
   min-height: 142px;
@@ -2299,11 +2269,6 @@ th {
 }
 
 @media (max-width: 640px) {
-  .topic-draw-head {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
   .topic-draw-window {
     min-height: 138px;
   }
@@ -2330,72 +2295,152 @@ th {
   color: var(--ink-soft);
 }
 
-.intent-streak {
-  display: grid;
-  min-width: 118px;
-  justify-items: end;
-  border-left: 1px solid var(--line-strong);
-  padding-left: 20px;
+/* 首页“下一步”行动卡：深色底上主按钮用白底，次要按钮用透明白边 */
+.home-action {
+  margin-top: 0;
 }
 
-.intent-streak span,
-.intent-streak small {
-  color: var(--muted);
-  font-size: 12px;
+.home-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
-.intent-streak strong {
+.home-action .button-primary {
+  background: #fff;
   color: var(--primary);
-  font-size: 34px;
-  line-height: 1;
 }
 
+.home-action .button-primary:hover:not(:disabled) {
+  background: #eef5f3;
+}
+
+.home-action .button-ghost {
+  border-color: rgb(255 255 255 / 45%);
+  background: transparent;
+  color: #fff;
+}
+
+.home-action .button-ghost:hover:not(:disabled) {
+  background: rgb(255 255 255 / 10%);
+}
+
+/* 练一回合：一张卡，标题 → 抽题轮播 → 按钮，不再嵌套 */
 .practice-entry {
   display: grid;
-  gap: 28px;
-  grid-template-columns: minmax(0, 1fr) 276px;
+  gap: 16px;
+  margin-top: 18px;
   border: 1px solid #b8cac3;
   border-radius: 14px;
   background: linear-gradient(135deg, #ffffff 0%, #f4f8f4 100%);
   box-shadow: 0 18px 48px rgb(25 42 40 / 10%);
-  padding: clamp(22px, 4vw, 42px);
+  padding: clamp(18px, 3vw, 32px);
 }
 
-.entry-main {
+/* grid 子元素默认最小宽度等于内容宽度，抽题轨道很长，不设 0 会把整张卡撑宽 */
+.practice-entry > * {
   min-width: 0;
 }
 
-.entry-kicker {
+.practice-head {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 12px;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.entry-main h2 {
+.practice-head h2 {
   max-width: 760px;
-  margin: 18px 0 10px;
+  margin: 6px 0 6px;
   color: var(--ink);
-  font-size: clamp(26px, 3.1vw, 42px);
+  font-size: clamp(22px, 2.6vw, 32px);
   letter-spacing: -0.02em;
+}
+
+.practice-head .text-button {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .entry-description {
   max-width: 680px;
+  margin: 0;
   color: var(--ink-soft);
 }
 
 .entry-controls {
-  display: grid;
-  align-content: center;
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
-.focus-band-quiet {
+.entry-controls .button-large {
+  min-width: 240px;
+}
+
+/* 首页进度：四个小数字加当前弱项 */
+.home-progress {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(0, 2.2fr);
+  gap: 1px;
   margin-top: 18px;
-  box-shadow: none;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.home-progress > div {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  min-height: 72px;
+  background: var(--surface);
+  padding: 12px 16px;
+}
+
+.home-progress span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.home-progress strong {
+  color: var(--primary);
+  font-size: 22px;
+}
+
+.home-progress strong small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.home-weakness strong {
+  font-size: 16px;
+}
+
+.home-weakness small {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.home-weakness .text-button {
+  justify-self: start;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* 30 课页头：已学数量与“开始下一课”主按钮 */
+.lessons-cta {
+  display: grid;
+  justify-items: end;
+  gap: 10px;
+}
+
+.lessons-cta .button {
+  white-space: nowrap;
 }
 
 .progress-strip {
@@ -2439,82 +2484,12 @@ th {
   font-weight: 600;
 }
 
+/* 抽题轮播直接放在练习卡里，不再套一层卡片 */
 .topic-draw {
-  margin-top: 24px;
-  border: 1px solid #cbd8d1;
-  border-radius: 12px;
-  background: rgb(237 243 239 / 72%);
-  padding: 16px;
-}
-
-.topic-draw-heading {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.topic-draw-heading h3 {
-  margin: 0 0 2px;
-  font-size: 17px;
-}
-
-.topic-draw-heading p:last-child {
   margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.draw-step-count {
-  color: var(--primary);
-  font-size: 25px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.draw-step-count small {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.draw-sequence {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  margin: 16px 0 12px;
+  border: 0;
+  background: transparent;
   padding: 0;
-  list-style: none;
-}
-
-.draw-sequence li {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.draw-sequence li span {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  border: 1px solid var(--line-strong);
-  border-radius: 50%;
-  background: var(--surface);
-  font-size: 10px;
-  font-weight: 800;
-}
-
-.draw-sequence li.is-current {
-  color: var(--primary);
-  font-weight: 800;
-}
-
-.draw-sequence li.is-current span {
-  border-color: var(--primary);
-  background: var(--primary);
-  color: #fff;
 }
 
 .draw-status {
@@ -2562,15 +2537,6 @@ th {
     align-items: start;
   }
 
-  .practice-entry {
-    grid-template-columns: 1fr;
-  }
-
-  .entry-controls {
-    border-top: 1px solid var(--line);
-    padding-top: 20px;
-  }
-
   .progress-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2578,16 +2544,13 @@ th {
   .progress-strip > .text-button {
     grid-column: 1 / -1;
   }
-}
 
-/* 首页概览共 8 项（4 项训练数据 + 4 条线），按 4 列排成两行，避免最后一行留空 */
-.progress-strip.progress-strip-overview {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
+  .home-progress {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 
-@media (max-width: 900px) {
-  .progress-strip.progress-strip-overview {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .home-weakness {
+    grid-column: 1 / -1;
   }
 }
 
@@ -2595,25 +2558,54 @@ th {
   .home-intent-bar {
     display: grid;
     gap: 14px;
+    margin-bottom: 14px;
   }
 
-  .intent-streak {
-    justify-items: start;
-    border-top: 1px solid var(--line);
-    border-left: 0;
-    padding-top: 12px;
-    padding-left: 0;
+  .home-action-buttons {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .practice-entry {
     border-radius: 10px;
-    padding: 18px;
+    padding: 16px;
   }
 
-  .topic-draw {
-    padding: 12px;
+  .practice-head {
+    display: grid;
   }
 
+  .entry-controls {
+    display: grid;
+  }
+
+  .entry-controls .button-large {
+    min-width: 0;
+  }
+
+  .home-progress {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .home-progress > div {
+    min-height: 60px;
+  }
+
+  /* 30 课页头带主按钮：窄屏上下排，按钮占满一行 */
+  .lessons-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .lessons-cta {
+    justify-items: start;
+  }
+
+  .lessons-cta .button {
+    width: 100%;
+    white-space: normal;
+  }
 }
 
 @media (max-width: 640px) {
@@ -3822,3 +3814,353 @@ th {
 .lesson-frameworks p { margin: 4px 0 0; color: var(--ink-soft); line-height: 1.6; }
 .lesson-tile > small { color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
 .lesson-tile.is-active { border-color: var(--yellow); box-shadow: 0 0 0 2px var(--yellow-soft); }
+
+/* ===== AI 助手：生成题标注、画像调研与画像页 ===== */
+.ai-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid #c4c9e6;
+  border-radius: 999px;
+  background: #f1f2fb;
+  color: #4b56a3;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.ai-note {
+  margin: 8px 0 0;
+  border-left: 3px solid #4b56a3;
+  padding-left: 10px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 首页 AI 通知条：浅色底，和行动卡、练习卡分开 */
+.ai-home-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 14px 0 0;
+  border: 1px solid #d6daf0;
+  border-radius: 8px;
+  background: #f4f5fc;
+  color: #4b56a3;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ai-home-status .text-button {
+  padding: 0;
+  font-size: 13px;
+}
+
+.ai-home-status .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.survey,
+.profile-layout {
+  display: grid;
+  max-width: 880px;
+  gap: 16px;
+}
+
+.survey-section h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.survey-section .field + .field,
+.survey-section .segmented + .field {
+  margin-top: 12px;
+}
+
+.chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chip.is-active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.chip-group.is-static {
+  margin-top: 10px;
+}
+
+.chip-group.is-static .chip {
+  cursor: default;
+}
+
+.situation-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.rating-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.rating-options {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.rating-options button {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rating-options button.is-active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.followup-list {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.profile-situations,
+.profile-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.profile-situations li {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.profile-situations small,
+.profile-situations span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.profile-facts li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 6px 0;
+}
+
+.profile-facts small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.fact-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.rating-compare {
+  display: grid;
+  gap: 6px;
+}
+
+.rating-compare > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 70px minmax(0, 170px);
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 6px 0;
+}
+
+.rating-compare em {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.digest-preview > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--primary);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.digest-preview pre {
+  margin: 12px 0 8px;
+  border-radius: 6px;
+  background: var(--surface-muted);
+  padding: 12px;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.ai-provider-list {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+/* 设置页 AI 区：服务列表与选择框和同区其他行左右对齐 */
+.ai-settings > .ai-provider-list,
+.ai-settings > .field {
+  margin: 16px 22px;
+}
+
+/* 设置页填写模型服务的表单 */
+.ai-config {
+  display: grid;
+  gap: 12px;
+  margin: 16px 22px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.ai-config h3 {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+.ai-config .text-button {
+  justify-self: start;
+}
+
+.ai-provider-list > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.ai-provider-list small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ai-consent-notice {
+  display: block;
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.digest-preview h3 {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+
+.profile-pending {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.profile-pending li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
+.profile-pending li > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.profile-pending small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pending-actions {
+  display: flex;
+  gap: 6px;
+}
+
+@media (max-width: 640px) {
+  .situation-row,
+  .rating-compare > div,
+  .profile-pending li {
+    grid-template-columns: 1fr;
+  }
+
+  /* 与窄屏下设置行的左右内边距（17px）对齐 */
+  .ai-settings > .ai-provider-list,
+  .ai-settings > .field,
+  .ai-config {
+    margin-inline: 17px;
+  }
+
+  /* 窄屏：服务名与模型名上下排，“已配置”标记放在右侧 */
+  .ai-provider-list > div {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 10px;
+  }
+
+  .ai-provider-list > div > small {
+    grid-column: 1;
+  }
+
+  .ai-provider-list > div > .status-badge {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+}

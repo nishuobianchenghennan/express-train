@@ -52,7 +52,7 @@ test("service worker precaches one complete version of the module graph", async 
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-cache");
     assert.match(body, /CACHE_PREFIX.*speak-clearly-/);
-    assert.match(body, /2026\.10\.06-3/);
+    assert.match(body, /2026\.10\.22-1/);
     assert.match(body, /\/js\/curriculum\/index\.js/);
     assert.match(body, /key\.startsWith\(CACHE_PREFIX\).*key !== CACHE_NAME/);
     assert.match(body, /\/js\/legacy\/card-additions\.js/);
