@@ -11,7 +11,7 @@ import { LINES } from "../curriculum/contexts.js";
 import { behaviorRates, currentWeakness, weaknessLabel } from "../arena/engine.js";
 import { learnedParadigms, pickLessonExample, recentlyLearned, recommendedLesson } from "../arena/lesson-engine.js";
 import {
-  fetchAiConfig, fetchAiStatus, requestFollowups, requestGeneratedCard, requestProfileSynthesis, requestReflection, saveAiConfig,
+  fetchAiConfig, fetchAiStatus, loadAccessCode, requestFollowups, requestGeneratedCard, requestProfileSynthesis, requestReflection, saveAccessCode, saveAiConfig,
 } from "./client.js";
 import { freshGeneratedCards, planExampleGeneration, planPracticeGeneration, planTransferGeneration, pruneGeneratedCards } from "./planner.js";
 import {
@@ -55,8 +55,14 @@ export function createAgentController(ctx) {
     return (state.ai.status?.providers ?? []).filter((provider) => provider.configured);
   }
 
+  /** 访问码通过（或服务端不要求访问码）。线上部署要求访问码，没通过时 AI 功能全部隐藏。 */
+  function accessOk() {
+    const access = state.ai.status?.access;
+    return !access || access === "none" || access === "ok";
+  }
+
   function available() {
-    return configuredProviders().length > 0;
+    return configuredProviders().length > 0 && accessOk();
   }
 
   /** 本次使用的服务：设置里选的且已配置，否则用服务端默认。 */
@@ -567,6 +573,21 @@ export function createAgentController(ctx) {
       state.ai.lastError = "";
       ctx.render();
       schedule();
+    } else if (action === "ai-access-save") {
+      const code = ctx.root.querySelector("[data-ai-access-code]")?.value.trim() ?? "";
+      if (!code) return true;
+      saveAccessCode(code);
+      state.ai.status = await fetchAiStatus();
+      const ok = state.ai.status?.access === "ok";
+      if (!ok) saveAccessCode("");
+      ctx.showToast(ok ? "访问码正确，AI 已解锁。" : "访问码不对，请重新填写。", ok ? "default" : "danger");
+      ctx.render();
+      if (ok) schedule();
+    } else if (action === "ai-access-clear") {
+      saveAccessCode("");
+      state.ai.status = await fetchAiStatus();
+      ctx.showToast("已清除这台设备上的访问码。", "default");
+      ctx.render();
     } else if (action === "ai-config-open") {
       await openConfigForm();
     } else if (action === "ai-config-cancel") {
@@ -813,23 +834,35 @@ export function createAgentController(ctx) {
       ? `<div class="ai-provider-list">${providers.map((provider) => `<div><strong>${escapeHtml(provider.label)}</strong><small>${escapeHtml(provider.model || "未填写模型名")}</small><span class="status-badge ${provider.configured ? "status-done" : "status-abandoned"}">${provider.configured ? "已配置" : "未配置"}</span></div>`).join("")}</div>`
       : "";
     const form = state.ai.configForm;
-    const configEntry = form
-      ? renderConfigForm(form)
-      : `<div class="setting-row stacked"><div><span>模型服务</span><small>${configured.length ? "可以在这里修改密钥、接口地址和模型。" : "在这里填写一家模型服务的密钥就能开启 AI，也可以写在 .env 里。"}</small></div><button class="button ${configured.length ? "button-secondary" : "button-primary"}" type="button" data-action="ai-config-open">${icon("settings")}${configured.length ? "修改模型服务" : "填写模型服务"}</button></div>`;
+    // 线上部署（Cloudflare Pages）不能在网页里改配置，模型服务在 Cloudflare 控制台设置
+    const configEntry = status?.configEditable === false
+      ? `<p class="data-note">线上部署的模型服务在 Cloudflare 控制台的 Settings → Variables and Secrets 中设置（变量名与 .env 相同，密钥选 Encrypt），改完需要重新部署。</p>`
+      : form
+        ? renderConfigForm(form)
+        : `<div class="setting-row stacked"><div><span>模型服务</span><small>${configured.length ? "可以在这里修改密钥、接口地址和模型。" : "在这里填写一家模型服务的密钥就能开启 AI，也可以写在 .env 里。"}</small></div><button class="button ${configured.length ? "button-secondary" : "button-primary"}" type="button" data-action="ai-config-open">${icon("settings")}${configured.length ? "修改模型服务" : "填写模型服务"}</button></div>`;
+    // 访问码已通过时，给一个清除入口（换设备或借给别人用之前清掉）
+    const accessRow = status?.access === "ok" && loadAccessCode()
+      ? `<div class="setting-row stacked"><div><span>访问码</span><small>这台设备已用访问码解锁 AI。</small></div><button class="button button-ghost" type="button" data-action="ai-access-clear">清除访问码</button></div>`
+      : "";
     let body;
     if (!status) {
-      body = `<p class="data-note">没有连上本机服务端（可能是以纯静态方式打开的页面），AI 功能不可用，其余功能照常。</p>`;
+      body = `<p class="data-note">没有连上 AI 服务端，AI 功能不可用，其余功能照常。本机运行请用 bun run dev 启动；部署到 Cloudflare Pages 时，请确认仓库里的 functions/ 目录随部署一起生效（部署记录里能看到 Functions）。</p>`;
+    } else if (status.access === "unset") {
+      body = `<p class="data-note">线上部署还没有设置访问码，为了不让别人用掉你的模型额度，AI 暂不开放。请在 Cloudflare 控制台的 Settings → Variables and Secrets 中添加加密变量 AI_ACCESS_CODE，然后重新部署。</p>`;
+    } else if (status.access === "required" || status.access === "invalid") {
+      body = `<div class="ai-config"><label class="field"><span>访问码</span><input type="password" autocomplete="off" data-ai-access-code placeholder="填写部署时设置的 AI_ACCESS_CODE"><small class="field-hint">${status.access === "invalid" ? "之前保存的访问码不对，请重新填写。" : "这个网站的 AI 需要访问码。访问码只保存在这台设备的浏览器里。"}</small></label><div class="drill-actions"><button class="button button-primary" type="button" data-action="ai-access-save">${icon("check")}解锁 AI</button></div></div>`;
     } else if (!configured.length) {
       body = `${providerList}${configEntry}`;
     } else {
       body = `${providerList}
         ${configEntry}
+        ${accessRow}
         ${configured.length > 1 ? `<label class="field"><span>使用哪家模型</span><select data-ai-provider>${configured.map((provider) => `<option value="${provider.id}"${provider.id === providerId() ? " selected" : ""}>${escapeHtml(provider.label)}（${escapeHtml(provider.model)}）</option>`).join("")}</select></label>` : ""}
         ${renderConsentToggle()}
         <p class="data-note">已为你生成 ${practiceTotal} 道练习题（${freshCount()} 道还没练）和 ${exampleTotal} 个课程示范。${state.ai.generating ? "正在生成…" : ""}</p>
         ${state.ai.lastError ? `<p class="data-note danger-text">最近一次生成失败：${escapeHtml(state.ai.lastError)}</p>${failures >= MAX_CONSECUTIVE_FAILURES ? `<button class="button button-secondary" type="button" data-action="ai-retry">${icon("rotate")}重新开始生成</button>` : ""}` : ""}`;
     }
-    return `<section class="settings-section ai-settings"><div class="settings-head"><div>${icon("brain")}</div><span><h2>AI 助手</h2><p>按你的画像生成课程示范和练习题。密钥保存在本机服务端，不会存进浏览器。</p></span></div>
+    return `<section class="settings-section ai-settings"><div class="settings-head"><div>${icon("brain")}</div><span><h2>AI 助手</h2><p>按你的画像生成课程示范和练习题。模型密钥只保存在服务端（本机或你的 Cloudflare 部署），不会存进浏览器。</p></span></div>
       ${body}
       <div class="setting-row stacked"><div><span>我的画像</span><small>${state.profile ? `已建档，最近更新于 ${escapeHtml(new Date(state.profile.updatedAt).toLocaleDateString("zh-CN"))}` : "还没有建档"}</small></div><button class="button button-secondary" type="button" data-action="navigate" data-view="profile">${icon("chevronRight")}查看画像</button></div>
     </section>`;

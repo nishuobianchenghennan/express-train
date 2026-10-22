@@ -727,7 +727,7 @@ function renderSettings() {
         <div class="data-actions"><button class="button button-secondary" type="button" data-action="export-data">${icon("download")}导出 JSON</button><label class="button button-secondary file-button">${icon("upload")}导入 JSON<input type="file" accept="application/json,.json" data-import-file></label>${state.installPrompt ? `<button class="button button-secondary" type="button" data-action="install-app">${icon("download")}安装到设备</button>` : ""}<button class="button button-danger-ghost" type="button" data-action="open-clear-data">${icon("trash")}清除全部本地数据</button></div>
         <p class="data-note">JSON 导出不包含录音文件。导入会合并训练记录并覆盖设置。</p>
       </section>
-      <section class="settings-section privacy-section"><div class="settings-head"><div>${icon("info")}</div><span><h2>隐私边界</h2><p>本应用不主动收集行为数据，也不接入广告或分析服务。</p></span></div><p>训练笔记与录音默认仅保存在当前设备的浏览器存储中。静态服务器仍可能处理提供网页所必需的基础访问信息，例如 IP 地址和 User-Agent；具体取决于部署环境。</p><p>麦克风只在你点击录音后请求权限。关闭页面前请先停止录音。</p><p>AI 助手默认关闭。开启后，画像摘要、训练摘要（学到第几课、各步覆盖率、行为弱项、最近练过的题目和“带走的一句话”）与出题规格会经本机服务端发送给你选择的模型服务；每完成几个回合，还会发送最近练习的题目、没做到的检查项和带走的话，用来提炼观察，观察经你确认后才写入画像。录音不会发送。</p></section>
+      <section class="settings-section privacy-section"><div class="settings-head"><div>${icon("info")}</div><span><h2>隐私边界</h2><p>本应用不主动收集行为数据，也不接入广告或分析服务。</p></span></div><p>训练笔记与录音默认仅保存在当前设备的浏览器存储中。静态服务器仍可能处理提供网页所必需的基础访问信息，例如 IP 地址和 User-Agent；具体取决于部署环境。</p><p>麦克风只在你点击录音后请求权限。关闭页面前请先停止录音。</p><p>AI 助手默认关闭。开启后，画像摘要、训练摘要（学到第几课、各步覆盖率、行为弱项、最近练过的题目和“带走的一句话”）与出题规格会经服务端（本机运行时是本机，部署到 Cloudflare Pages 时是你的 Pages Function）发送给你选择的模型服务；每完成几个回合，还会发送最近练习的题目、没做到的检查项和带走的话，用来提炼观察，观察经你确认后才写入画像。录音不会发送。</p></section>
     </div>
   `;
   return renderShell(content, { title: "设置" });

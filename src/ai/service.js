@@ -3,8 +3,6 @@
  *
  * 浏览器传来的内容一律按白名单整理并限制长度；模型输出一律经校验后才返回。
  */
-import { randomUUID } from "node:crypto";
-
 import { CHECKS } from "../../public/js/curriculum/checks.js";
 import { CONTEXT_MAP, PARADIGM_MAP, generatedCardErrors } from "../../public/js/curriculum/index.js";
 import { CAREER_STAGES } from "../../public/js/curriculum/ids.js";
@@ -60,7 +58,8 @@ function assembleCard(raw, { context, paradigm, purpose, provider }) {
   const questions = isObject(guide.questions) ? guide.questions : {};
   const bad = isObject(raw.badExample) ? raw.badExample : {};
   return {
-    id: `${context.id}-G${randomUUID().replaceAll("-", "").slice(0, 8)}`,
+    // 用全局 crypto（Node 与 Cloudflare Workers 都有），服务层不依赖 Node 内置模块
+    id: `${context.id}-G${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`,
     contextId: context.id,
     paradigmId: paradigm.id,
     industryId: null,
