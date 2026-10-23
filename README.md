@@ -23,6 +23,7 @@
 - [旧数据](#旧数据)
 - [AI 助手（可选）](#ai-助手可选)
 - [快速开始](#快速开始)
+- [Android App](#android-app)
 - [命令](#命令)
 - [配置](#配置)
 - [项目结构](#项目结构)
@@ -306,6 +307,7 @@
 | `OPENAI_COMPAT_JSON_MODE` | `json_schema`（默认，严格结构化输出）或 `json_object`（DeepSeek、智谱等只支持 JSON 模式的服务） |
 | `OPENAI_COMPAT_EXTRA_BODY` | 附加到请求体的 JSON，如通义千问严格结构化输出需要的 `{"enable_thinking": false}` |
 | `AI_CONFIG_FILE` | 网页填写的配置保存在哪个文件，默认项目根目录的 `ai-config.local.json` |
+| `AI_ACCESS_CODE` | 访问码。设了之后，AI 请求必须带同样的访问码（在设置页填一次，保存在这台设备的浏览器里）。本机运行可以不设；部署到 Cloudflare Pages 时必须设，否则线上 AI 不开放 |
 
 两家都配置时，可以在设置页切换。密钥只在本机服务端使用：`GET /api/ai/status` 只返回服务名、模型名和是否已配置；设置页表单读取的 `GET /api/ai/config` 只说明密钥是否已配置、来自网页还是 `.env`，不返回密钥。
 
@@ -346,6 +348,38 @@ bun run start:prod # 以 NODE_ENV=production 提供 dist/
 ```
 
 `public/_headers` 为静态托管平台提供与开发服务器一致的安全响应头。
+
+**部署到 Cloudflare Pages（GitHub 自动部署）**
+
+静态托管只提供页面，AI 接口由仓库里的 `functions/api/ai/[[path]].js`（Pages Function）提供，推送后随页面一起部署。
+
+1. 在 Cloudflare 控制台打开这个 Pages 项目 → Settings → Variables and Secrets，按上面的变量表添加模型服务（例如 `OPENAI_COMPAT_BASE_URL`、`OPENAI_COMPAT_API_KEY`、`OPENAI_COMPAT_MODEL`、`OPENAI_COMPAT_JSON_MODE`），**再添加访问码 `AI_ACCESS_CODE`**。密钥和访问码选 Encrypt。正式环境（Production）和预览环境（Preview）分别设置。
+2. 重新部署（改变量后要重新部署才生效）。部署记录里应能看到 Functions。
+3. 打开线上网站 → 设置 → AI 助手，填一次访问码。之后这台设备就能用 AI；换设备要重新填。
+
+线上不能在网页里填写模型服务（Pages 没有可写的文件），模型服务只在 Cloudflare 控制台设置。没设 `AI_ACCESS_CODE` 时线上 AI 一律不开放，避免别人打开网站就用掉你的模型额度。
+
+---
+
+## Android App
+
+`mobile/` 用 Capacitor 8 把 `public/` 原样打包成 Android 应用（侧载安装，不上架）。网页代码只通过 `public/js/platform.js` 区分平台：App 里接管系统返回键、键盘、系统栏和启动页，导出改走系统分享，不注册 Service Worker；网页里行为不变。Capacitor 的依赖只装在 `mobile/`，不影响根目录和 Cloudflare 构建。
+
+**要求**：Android Studio 2025.2.1 或更新版本（自带 JDK 21）、Android SDK 36、Node.js 22 或更新版本、Bun；手机为 Android 7.0 及以上（华为 HarmonyOS NEXT 不能直接安装 APK）。
+
+```bash
+cd mobile
+bun install
+bun run sync     # 复制 ../public 到 www/，打包原生桥，同步到 android/
+bun run android  # 装到 USB 连接（已开 USB 调试）的手机或模拟器
+bun run open     # 用 Android Studio 打开，可在 Build → Build APK(s) 打出安装包
+```
+
+改了 `public/` 之后重新 `bun run sync` 再安装。命令行打包时需要 `JAVA_HOME` 指向 Android Studio 的 `jbr`、`ANDROID_HOME` 指向 SDK，然后在 `mobile/android` 下运行 `gradlew assembleDebug`，安装包在 `app/build/outputs/apk/debug/`。
+
+- **数据**：App 的数据和浏览器里的数据是分开的。第一次使用时在网页版设置页导出 JSON，再到 App 设置页导入。卸载 App 会清空数据；用同一个签名覆盖安装会保留。默认用本机的调试签名，换电脑打包后无法覆盖安装，换之前先导出数据。
+- **AI**：App 里在设置 → AI 助手填写服务地址（部署好的 `https://项目.pages.dev` 或自定义域名）和访问码。Pages Function 只对 App 的来源 `https://localhost` 开放跨域，改过 `functions/` 后要重新部署一次。`pages.dev` 在国内网络下可能连不上，此时 AI 显示未连接，离线训练不受影响。
+- **录音**：第一次开口时系统会请求麦克风权限。
 
 ---
 
@@ -395,6 +429,7 @@ express_train/
 │   ├── _headers                  # 静态托管的安全响应头
 │   └── js/
 │       ├── app.js                # 外壳、路由、今日计划、30 课页、历史/能力/设置页
+│       ├── platform.js           # 平台适配：网页无操作，Android App 里加载原生桥
 │       ├── storage.js            # IndexedDB 存储、导入导出、新旧记录分流校验
 │       ├── icons.js
 │       ├── curriculum/           # 课程体系内容（纯数据 + 校验）
@@ -414,6 +449,8 @@ express_train/
 │       │   └── recorder.js       # 回合与课程共用的录音与计时生命周期
 │       ├── agent/                # AI 助手：画像结构、训练记忆与出题规划（纯函数）、接口调用、画像页与后台任务
 │       └── legacy/               # 冻结的旧版题库与引擎，只用于校验和展示旧记录
+├── functions/api/ai/             # Cloudflare Pages Function：线上的 /api/ai 接口
+├── mobile/                       # Android App（Capacitor）：原生桥 bridge.js、打包脚本、android/ 工程
 ├── scripts/                      # build / lint / 生产启动脚本
 └── test/                         # Node.js 内置测试
 ```

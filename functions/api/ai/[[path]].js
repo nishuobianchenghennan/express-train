@@ -5,50 +5,69 @@
  *   变量名与 .env 相同；密钥请设成加密变量（Encrypt）。
  * - 线上强制要求访问码 AI_ACCESS_CODE：没设时 AI 一律不开放，避免别人打开网站就用掉你的模型额度。
  * - 线上不能在网页里改模型服务配置（没有可写的文件），/config 一律拒绝。
+ * - Android App（Capacitor）的页面来源是 https://localhost，调用这里属于跨域；只对这一个来源开放 CORS，
+ *   其他跨站请求照旧拒绝，访问码照旧必填。
  */
 import { ACCESS_CODE_HEADER, ACCESS_ERRORS, ALLOWED_FETCH_SITES, MODEL_ROUTES, accessAllowed, accessState } from "../../../src/ai/api.js";
 import { publicAiStatus, readAiConfig } from "../../../src/ai/config.js";
 import { AiServiceError } from "../../../src/ai/errors.js";
 
-function json(status, body) {
+const APP_ORIGIN = "https://localhost";
+
+function json(status, body, cors) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", Vary: "Origin", ...cors },
   });
 }
 
 export async function onRequest({ request, env, params }) {
   const path = `/${[params.path ?? []].flat().join("/")}`;
+  const fromApp = request.headers.get("origin") === APP_ORIGIN;
+  const cors = fromApp ? { "Access-Control-Allow-Origin": APP_ORIGIN } : {};
+  // 带访问码请求头的跨域请求会先发预检
+  if (fromApp && request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        ...cors,
+        "Access-Control-Allow-Methods": "GET, POST",
+        "Access-Control-Allow-Headers": `content-type, ${ACCESS_CODE_HEADER}`,
+        "Access-Control-Max-Age": "600",
+        Vary: "Origin",
+      },
+    });
+  }
   const site = request.headers.get("sec-fetch-site");
-  if (site && !ALLOWED_FETCH_SITES.has(site)) return json(403, { error: "只接受来自本应用页面的请求。" });
+  if (site && !ALLOWED_FETCH_SITES.has(site) && !fromApp) return json(403, { error: "只接受来自本应用页面的请求。" });
 
   const config = readAiConfig(env);
   const access = accessState(env.AI_ACCESS_CODE, request.headers.get(ACCESS_CODE_HEADER), { required: true });
 
   if (path === "/status" && request.method === "GET") {
-    return json(200, { ...publicAiStatus(config), configEditable: false, access });
+    return json(200, { ...publicAiStatus(config), configEditable: false, access }, cors);
   }
   if (path === "/config") {
-    return json(403, { error: "线上部署不能在网页里修改模型服务，请在 Cloudflare 控制台的 Settings → Variables and Secrets 中设置。" });
+    return json(403, { error: "线上部署不能在网页里修改模型服务，请在 Cloudflare 控制台的 Settings → Variables and Secrets 中设置。" }, cors);
   }
   const run = MODEL_ROUTES[path];
-  if (!run || request.method !== "POST") return json(404, { error: "Not Found" });
+  if (!run || request.method !== "POST") return json(404, { error: "Not Found" }, cors);
   if (!accessAllowed(access)) {
     const [status, message] = ACCESS_ERRORS[access];
-    return json(status, { error: message });
+    return json(status, { error: message }, cors);
   }
 
   let body;
   try {
     body = await request.json();
   } catch {
-    return json(400, { error: "请求内容不是合法的 JSON。" });
+    return json(400, { error: "请求内容不是合法的 JSON。" }, cors);
   }
   try {
-    return json(200, await run(config, body && typeof body === "object" ? body : {}));
+    return json(200, await run(config, body && typeof body === "object" ? body : {}), cors);
   } catch (error) {
-    if (error instanceof AiServiceError) return json(error.status, { error: error.message });
+    if (error instanceof AiServiceError) return json(error.status, { error: error.message }, cors);
     console.error("[ai]", error);
-    return json(500, { error: "Internal Server Error" });
+    return json(500, { error: "Internal Server Error" }, cors);
   }
 }

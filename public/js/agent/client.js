@@ -4,9 +4,40 @@
  *
  * 服务端设了访问码时，每个请求都带上本机保存的访问码。访问码只存在这个浏览器的 localStorage，
  * 不进设置、不随 JSON 导出。
+ *
+ * Android App 的页面打包在安装包里，没有同源的服务端：请求发往用户在设置页填写的服务地址
+ * （部署好的 Cloudflare Pages 网站），地址与访问码一样只存在本机。
  */
+import { isNativeApp } from "../platform.js";
 
 const ACCESS_CODE_KEY = "speak-clearly-ai-access-code";
+const AI_SERVER_KEY = "speak-clearly-ai-server";
+
+/** App 里保存的服务地址（只含协议与域名）；网页里不用。 */
+export function loadAiServer() {
+  try {
+    return localStorage.getItem(AI_SERVER_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** 保存服务地址；传空串表示清除。 */
+export function saveAiServer(origin) {
+  try {
+    if (origin) localStorage.setItem(AI_SERVER_KEY, origin);
+    else localStorage.removeItem(AI_SERVER_KEY);
+  } catch {
+    // 存不下时本次会话仍可用，只是下次需要重新填写
+  }
+}
+
+/** 接口地址：网页里同源；App 里拼上服务地址，还没填时为 null。 */
+function apiUrl(path) {
+  if (!isNativeApp) return `/api/ai${path}`;
+  const server = loadAiServer();
+  return server ? `${server}/api/ai${path}` : null;
+}
 
 /** 本机保存的访问码；浏览器禁用存储时视为没有。 */
 export function loadAccessCode() {
@@ -33,16 +64,20 @@ function accessHeaders() {
 }
 
 async function send(path, { method = "POST", body } = {}) {
+  const url = apiUrl(path);
+  if (!url) throw new Error("先在设置页的 AI 助手里填写服务地址。");
   let response;
   try {
-    response = await fetch(`/api/ai${path}`, {
+    response = await fetch(url, {
       method,
       cache: "no-store",
       headers: { ...accessHeaders(), ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new Error("连不上 AI 服务端：本机运行请用 bun run dev 启动；线上部署请检查 Cloudflare Pages 的 Functions 是否部署成功。");
+    throw new Error(isNativeApp
+      ? "连不上 AI 服务端：请检查网络，以及设置页里的服务地址能否在手机浏览器打开。"
+      : "连不上 AI 服务端：本机运行请用 bun run dev 启动；线上部署请检查 Cloudflare Pages 的 Functions 是否部署成功。");
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `AI 请求失败（${response.status}）`);
@@ -68,8 +103,10 @@ export function saveAiConfig(update) {
  * 访问码状态（access：none / ok / required / invalid / unset）；服务端不可用时返回 null。
  */
 export async function fetchAiStatus() {
+  const url = apiUrl("/status");
+  if (!url) return null;
   try {
-    const response = await fetch("/api/ai/status", { cache: "no-store", headers: accessHeaders() });
+    const response = await fetch(url, { cache: "no-store", headers: accessHeaders() });
     if (!response.ok) return null;
     const data = await response.json();
     return Array.isArray(data?.providers) ? data : null;

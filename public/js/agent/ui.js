@@ -11,8 +11,9 @@ import { LINES } from "../curriculum/contexts.js";
 import { behaviorRates, currentWeakness, weaknessLabel } from "../arena/engine.js";
 import { learnedParadigms, pickLessonExample, recentlyLearned, recommendedLesson } from "../arena/lesson-engine.js";
 import {
-  fetchAiConfig, fetchAiStatus, loadAccessCode, requestFollowups, requestGeneratedCard, requestProfileSynthesis, requestReflection, saveAccessCode, saveAiConfig,
+  fetchAiConfig, fetchAiStatus, loadAccessCode, loadAiServer, requestFollowups, requestGeneratedCard, requestProfileSynthesis, requestReflection, saveAccessCode, saveAiConfig, saveAiServer,
 } from "./client.js";
+import { isNativeApp } from "../platform.js";
 import { freshGeneratedCards, planExampleGeneration, planPracticeGeneration, planTransferGeneration, pruneGeneratedCards } from "./planner.js";
 import {
   FOCUS_OPTIONS, MAX_FACTS, MAX_FOCUS, MAX_PENDING_FACTS, MAX_SITUATIONS, SELF_RATING_DIMENSIONS,
@@ -588,6 +589,29 @@ export function createAgentController(ctx) {
       state.ai.status = await fetchAiStatus();
       ctx.showToast("已清除这台设备上的访问码。", "default");
       ctx.render();
+    } else if (action === "ai-server-save") {
+      // 只接受 https 网站地址，粘贴了带路径的地址时只取协议与域名
+      const input = ctx.root.querySelector("[data-ai-server]")?.value.trim() ?? "";
+      let origin = "";
+      try {
+        const url = new URL(input);
+        if (url.protocol === "https:") origin = url.origin;
+      } catch {
+        // 不是合法地址，下面统一提示
+      }
+      if (!origin) {
+        ctx.showToast("请填写以 https:// 开头的网站地址，例如 https://你的项目.pages.dev。", "danger");
+        return true;
+      }
+      saveAiServer(origin);
+      state.ai.status = await fetchAiStatus();
+      ctx.showToast(state.ai.status ? "已连上 AI 服务端。" : "连不上这个地址，请检查地址和网络。", state.ai.status ? "default" : "danger");
+      ctx.render();
+      if (state.ai.status) schedule();
+    } else if (action === "ai-server-clear") {
+      saveAiServer("");
+      state.ai.status = null;
+      ctx.render();
     } else if (action === "ai-config-open") {
       await openConfigForm();
     } else if (action === "ai-config-cancel") {
@@ -844,8 +868,15 @@ export function createAgentController(ctx) {
     const accessRow = status?.access === "ok" && loadAccessCode()
       ? `<div class="setting-row stacked"><div><span>访问码</span><small>这台设备已用访问码解锁 AI。</small></div><button class="button button-ghost" type="button" data-action="ai-access-clear">清除访问码</button></div>`
       : "";
+    // App 的 AI 请求发往这里填写的服务地址（部署好的网站），连上后给一个更换入口
+    const server = isNativeApp ? loadAiServer() : "";
+    const serverRow = isNativeApp && status
+      ? `<div class="setting-row stacked"><div><span>服务地址</span><small>${escapeHtml(server)}</small></div><button class="button button-ghost" type="button" data-action="ai-server-clear">更换服务地址</button></div>`
+      : "";
     let body;
-    if (!status) {
+    if (!status && isNativeApp) {
+      body = `<div class="ai-config"><label class="field"><span>服务地址</span><input type="url" inputmode="url" autocomplete="off" spellcheck="false" data-ai-server value="${escapeHtml(server)}" placeholder="https://你的项目.pages.dev"><small class="field-hint">${server ? `连不上 ${escapeHtml(server)}：请确认网站已部署，并且手机能打开它。` : "App 里的 AI 通过你部署的网站调用，请填写它的地址（Cloudflare Pages 的 pages.dev 地址或自定义域名）。"}</small></label><div class="drill-actions"><button class="button button-primary" type="button" data-action="ai-server-save">${icon("check")}连接</button></div></div>`;
+    } else if (!status) {
       body = `<p class="data-note">没有连上 AI 服务端，AI 功能不可用，其余功能照常。本机运行请用 bun run dev 启动；部署到 Cloudflare Pages 时，请确认仓库里的 functions/ 目录随部署一起生效（部署记录里能看到 Functions）。</p>`;
     } else if (status.access === "unset") {
       body = `<p class="data-note">线上部署还没有设置访问码，为了不让别人用掉你的模型额度，AI 暂不开放。请在 Cloudflare 控制台的 Settings → Variables and Secrets 中添加加密变量 AI_ACCESS_CODE，然后重新部署。</p>`;
@@ -863,6 +894,7 @@ export function createAgentController(ctx) {
         ${state.ai.lastError ? `<p class="data-note danger-text">最近一次生成失败：${escapeHtml(state.ai.lastError)}</p>${failures >= MAX_CONSECUTIVE_FAILURES ? `<button class="button button-secondary" type="button" data-action="ai-retry">${icon("rotate")}重新开始生成</button>` : ""}` : ""}`;
     }
     return `<section class="settings-section ai-settings"><div class="settings-head"><div>${icon("brain")}</div><span><h2>AI 助手</h2><p>按你的画像生成课程示范和练习题。模型密钥只保存在服务端（本机或你的 Cloudflare 部署），不会存进浏览器。</p></span></div>
+      ${serverRow}
       ${body}
       <div class="setting-row stacked"><div><span>我的画像</span><small>${state.profile ? `已建档，最近更新于 ${escapeHtml(new Date(state.profile.updatedAt).toLocaleDateString("zh-CN"))}` : "还没有建档"}</small></div><button class="button button-secondary" type="button" data-action="navigate" data-view="profile">${icon("chevronRight")}查看画像</button></div>
     </section>`;

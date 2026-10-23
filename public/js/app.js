@@ -12,6 +12,7 @@ import { applyRateBars, createArenaController, estimateDrillMinutes, renderDrill
 import { learnedParadigms, recentlyLearned, recommendedLesson } from "./arena/lesson-engine.js";
 import { createLessonController, renderCurriculumMap } from "./arena/lesson-ui.js";
 import { createAgentController } from "./agent/ui.js";
+import { initPlatform, isNativeApp, minimizeApp, saveTextFile } from "./platform.js";
 import {
   archiveLegacyInProgress,
   clearAllData,
@@ -1002,6 +1003,19 @@ function closeModal(event) {
   render();
 }
 
+/** Android 系统返回：先关弹窗；表达中不离开；课程工作台回 30 课，其他页面回首页；首页切到后台。 */
+function handleBack() {
+  if (state.modal) {
+    closeModal();
+  } else if (arena.isBusy() || lessons.isBusy()) {
+    showToast(BUSY_NAVIGATION_MESSAGE, "danger");
+  } else if (state.view === "home") {
+    minimizeApp();
+  } else {
+    navigate(state.view === "lesson" ? "lessons" : "home");
+  }
+}
+
 async function updateSetting(id, value) {
   const settings = { ...state.settings, [id]: value };
   await saveSettings(settings);
@@ -1011,16 +1025,8 @@ async function updateSetting(id, value) {
 
 async function exportData() {
   const data = await exportLocalData();
-  const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `讲明白-本地数据-${dateKey(new Date())}.json`;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-  showToast("已导出训练记录与设置，录音未包含。", "default");
+  const saved = await saveTextFile(`讲明白-本地数据-${dateKey(new Date())}.json`, `${JSON.stringify(data, null, 2)}\n`, "application/json");
+  if (saved) showToast("已导出训练记录与设置，录音未包含。", "default");
 }
 
 async function importData(file) {
@@ -1219,9 +1225,16 @@ window.addEventListener("hashchange", () => {
     return;
   }
   if (next !== requested) history.replaceState(null, "", `#${next}`);
+  const changed = next !== state.view;
   state.view = next;
   state.pendingFocus ??= { type: "main" };
-  render();
+  // 换页时新页面从顶部开始，主内容淡入（浏览器支持且没要求减少动画时）；同一页面的重渲染不滚动、不加动画
+  const showView = () => {
+    render();
+    if (changed) window.scrollTo({ top: 0, behavior: "instant" });
+  };
+  if (changed && document.startViewTransition && !prefersReducedMotion()) document.startViewTransition(showView);
+  else showView();
 });
 
 window.addEventListener("keydown", (event) => {
@@ -1320,9 +1333,12 @@ async function initialize() {
   }
   render();
   if (archivedLegacy) showToast("旧版训练的进行中进度已归档到历史。");
+  // 首屏渲染后再接管系统返回并收起 App 启动页
+  void initPlatform({ onBack: handleBack });
   // AI 状态查询不阻塞首屏；服务端不可用时 AI 功能自动隐藏
   void agent.init();
-  if ("serviceWorker" in navigator) {
+  // App 的文件随安装包存在本机，不需要离线缓存
+  if ("serviceWorker" in navigator && !isNativeApp) {
     navigator.serviceWorker.register("/sw.js").catch(() => {
       // Offline installation is optional during local development.
     });

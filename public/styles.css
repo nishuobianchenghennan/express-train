@@ -32,12 +32,29 @@
   --shadow: 0 12px 36px rgb(25 42 40 / 8%);
   --sidebar: 236px;
   --topbar: 64px;
-  --mobile-nav: 64px;
+  --mobile-nav: 80px;
   --radius: 8px;
+  /* 全面屏安全区：Android App 由 Capacitor 注入 --safe-area-inset-*（旧版 WebView 的 env() 读数为 0），网页用 env() */
+  --inset-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --inset-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* 触屏：去掉点按时的灰色高亮，改用按下状态层；按钮与导航长按不选中文字 */
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.button,
+.icon-button,
+.nav-item,
+.bottom-nav {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 html {
@@ -119,6 +136,62 @@ a:focus-visible {
 /* 切换页面时程序会把焦点移到主内容区，作为读屏的起点；它不是可操作控件，不画焦点框 */
 .main-content:focus {
   outline: none;
+}
+
+/*
+ * 切换页面的过渡（View Transitions，由 app.js 在切换页面时启动）：只有主内容区淡入并轻微上移；
+ * 顶栏与底部导航单独成组、直接换成新状态，免得旧内容的截图盖住它们。
+ */
+.main-content {
+  view-transition-name: main;
+}
+
+.topbar {
+  view-transition-name: topbar;
+}
+
+.bottom-nav {
+  view-transition-name: bottom-nav;
+}
+
+::view-transition-old(root),
+::view-transition-new(root),
+::view-transition-group(topbar),
+::view-transition-new(topbar),
+::view-transition-group(bottom-nav),
+::view-transition-new(bottom-nav) {
+  animation: none;
+}
+
+::view-transition-old(topbar),
+::view-transition-old(bottom-nav) {
+  display: none;
+}
+
+/* Material 的 fade through：旧内容先淡出，新内容随后淡入，两者不重叠 */
+::view-transition-group(main) {
+  animation-duration: 220ms;
+}
+
+::view-transition-old(main) {
+  animation: 60ms ease-out both view-fade-out;
+}
+
+::view-transition-new(main) {
+  animation: 160ms ease-out 60ms both view-rise-in;
+}
+
+@keyframes view-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes view-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
 }
 
 h1,
@@ -286,9 +359,11 @@ svg.icon {
   transition: background-color 140ms ease, color 140ms ease;
 }
 
-.nav-item:hover {
-  background: var(--surface-alt);
-  color: var(--ink);
+@media (hover: hover) {
+  .nav-item:hover {
+    background: var(--surface-alt);
+    color: var(--ink);
+  }
 }
 
 .nav-item.is-active {
@@ -647,13 +722,18 @@ textarea::placeholder {
   transform: translateY(1px);
 }
 
+/* 按下状态层：叠在原背景色上压暗一点，深浅按钮通用 */
+.button:not(:disabled):active,
+.icon-button:not(:disabled):active,
+.nav-item:active,
+.history-row:active,
+.lesson-tile:active {
+  background-image: linear-gradient(rgb(24 37 38 / 10%), rgb(24 37 38 / 10%));
+}
+
 .button-primary {
   background: var(--primary);
   color: #fff;
-}
-
-.button-primary:hover:not(:disabled) {
-  background: var(--primary-hover);
 }
 
 .button-secondary {
@@ -662,20 +742,10 @@ textarea::placeholder {
   color: var(--primary);
 }
 
-.button-secondary:hover:not(:disabled) {
-  background: #d2e5e2;
-}
-
 .button-ghost {
   border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--ink-soft);
-}
-
-.button-ghost:hover:not(:disabled) {
-  border-color: #99aaa4;
-  background: var(--surface-alt);
-  color: var(--ink);
 }
 
 .button-danger {
@@ -683,8 +753,25 @@ textarea::placeholder {
   color: #fff;
 }
 
-.button-danger:hover:not(:disabled) {
-  background: #9e312d;
+/* 悬停样式只给有鼠标的设备；触屏点按后不会停留在悬停色 */
+@media (hover: hover) {
+  .button-primary:hover:not(:disabled) {
+    background: var(--primary-hover);
+  }
+
+  .button-secondary:hover:not(:disabled) {
+    background: #d2e5e2;
+  }
+
+  .button-ghost:hover:not(:disabled) {
+    border-color: #99aaa4;
+    background: var(--surface-alt);
+    color: var(--ink);
+  }
+
+  .button-danger:hover:not(:disabled) {
+    background: #9e312d;
+  }
 }
 
 .button-danger-ghost {
@@ -709,10 +796,12 @@ textarea::placeholder {
   padding: 0;
 }
 
-.icon-button:hover {
-  border-color: var(--line-strong);
-  background: var(--surface-alt);
-  color: var(--ink);
+@media (hover: hover) {
+  .icon-button:hover {
+    border-color: var(--line-strong);
+    background: var(--surface-alt);
+    color: var(--ink);
+  }
 }
 
 .icon-button.is-favorite {
@@ -1132,8 +1221,10 @@ progress::-moz-progress-bar {
   padding: 17px 5px;
 }
 
-.history-row:hover {
-  background: rgb(255 255 255 / 55%);
+@media (hover: hover) {
+  .history-row:hover {
+    background: rgb(255 255 255 / 55%);
+  }
 }
 
 .history-date {
@@ -1837,9 +1928,10 @@ th {
   }
 
   .topbar {
+    height: calc(var(--topbar) + var(--inset-top));
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 12px;
-    padding: 0 18px;
+    padding: var(--inset-top) 18px 0;
   }
 
   .mobile-brand {
@@ -1860,11 +1952,11 @@ th {
   }
 
   .main-content {
-    padding: 28px 22px calc(var(--mobile-nav) + 34px);
+    padding: 28px 22px calc(var(--mobile-nav) + var(--inset-bottom) + 34px);
   }
 
   .training-content {
-    padding-bottom: 44px;
+    padding-bottom: calc(44px + var(--inset-bottom));
   }
 
   .bottom-nav {
@@ -1874,27 +1966,62 @@ th {
     bottom: 0;
     left: 0;
     display: grid;
-    min-height: var(--mobile-nav);
+    min-height: calc(var(--mobile-nav) + var(--inset-bottom));
     grid-template-columns: repeat(6, minmax(0, 1fr));
     border-top: 1px solid var(--line);
     background: rgb(255 255 255 / 96%);
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: var(--inset-bottom);
     backdrop-filter: blur(12px);
+  }
+
+  /* 输入时键盘弹起，收起底部导航，把空间留给输入框（App 里由原生桥加类名） */
+  .keyboard-open .bottom-nav {
+    display: none;
   }
 
   .bottom-nav .nav-item {
     display: grid;
-    min-height: 62px;
+    min-height: var(--mobile-nav);
     place-content: center;
     justify-items: center;
-    gap: 2px;
+    gap: 4px;
     border-radius: 0;
-    padding: 6px 2px;
+    padding: 12px 2px 14px;
     text-align: center;
   }
 
+  /* Material 3 导航栏：当前页的图标背后是胶囊高亮，整格不铺底色，按下时胶囊浮现 */
+  .bottom-nav .nav-item.is-active,
+  .bottom-nav .nav-item:active {
+    background: transparent;
+  }
+
+  .bottom-nav .nav-item svg.icon {
+    box-sizing: content-box;
+    width: 22px;
+    height: 22px;
+    border-radius: 999px;
+    padding: 5px 14px;
+    transition: background-color 160ms ease;
+  }
+
+  .bottom-nav .nav-item.is-active svg.icon,
+  .bottom-nav .nav-item:active svg.icon {
+    background: var(--primary-soft);
+  }
+
+  @media (hover: hover) {
+    .bottom-nav .nav-item:hover {
+      background: transparent;
+    }
+
+    .bottom-nav .nav-item:not(.is-active):hover svg.icon {
+      background: var(--surface-alt);
+    }
+  }
+
   .bottom-nav .nav-item span {
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .sensitive-task-notice .button {
@@ -1941,7 +2068,7 @@ th {
   }
 
   .topbar {
-    padding: 0 12px;
+    padding: var(--inset-top) 12px 0;
   }
 
   .topbar-title {
@@ -1957,7 +2084,17 @@ th {
   }
 
   .main-content {
-    padding: 22px 14px calc(var(--mobile-nav) + 28px);
+    padding: 22px 14px calc(var(--mobile-nav) + var(--inset-bottom) + 28px);
+  }
+
+  /* 触控区：按钮至少 48px 高，图标按钮 44px 见方 */
+  .button {
+    min-height: 48px;
+  }
+
+  .icon-button {
+    width: 44px;
+    height: 44px;
   }
 
   .page-heading {
@@ -2119,7 +2256,7 @@ th {
     border-bottom: 0;
     border-left: 0;
     border-radius: 8px 8px 0 0;
-    padding: 22px 17px calc(22px + env(safe-area-inset-bottom));
+    padding: 22px 17px calc(22px + var(--inset-bottom));
   }
 
   .check-list.compact {
@@ -2136,12 +2273,12 @@ th {
 
   .toast-region {
     right: 12px;
-    bottom: calc(var(--mobile-nav) + 10px);
+    bottom: calc(var(--mobile-nav) + var(--inset-bottom) + 10px);
     width: calc(100vw - 24px);
   }
 
   .app-shell.is-training + .toast-region {
-    bottom: 12px;
+    bottom: calc(12px + var(--inset-bottom));
   }
 }
 
@@ -2312,8 +2449,10 @@ th {
   color: var(--primary);
 }
 
-.home-action .button-primary:hover:not(:disabled) {
-  background: #eef5f3;
+@media (hover: hover) {
+  .home-action .button-primary:hover:not(:disabled) {
+    background: #eef5f3;
+  }
 }
 
 .home-action .button-ghost {
@@ -2322,8 +2461,10 @@ th {
   color: #fff;
 }
 
-.home-action .button-ghost:hover:not(:disabled) {
-  background: rgb(255 255 255 / 10%);
+@media (hover: hover) {
+  .home-action .button-ghost:hover:not(:disabled) {
+    background: rgb(255 255 255 / 10%);
+  }
 }
 
 /* 练一回合：一张卡，标题 → 抽题轮播 → 按钮，不再嵌套 */
@@ -3497,8 +3638,10 @@ th {
   cursor: pointer;
 }
 
-.lesson-tile:hover {
-  border-color: var(--primary);
+@media (hover: hover) {
+  .lesson-tile:hover {
+    border-color: var(--primary);
+  }
 }
 
 .lesson-tile.is-next {
